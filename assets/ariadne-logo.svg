@@ -1,0 +1,13 @@
+<svg width="680" height="440" viewBox="0 0 680 440" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Ariadne</title>
+<desc>The Ariadne logo: a spiral thread with five graph nodes converging to a warm coral center, above the wordmark "ariadne" and the tagline "the thread through your codebase".</desc>
+<path fill="none" stroke="#3C3489" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" d="M 340,82 L 351.5,83.65 L 362.55,86.77 L 372.99,91.28 L 382.63,97.09 L 391.34,104.04 L 398.96,112.01 L 405.38,120.83 L 410.53,130.31 L 414.32,140.29 L 416.74,150.57 L 417.75,160.96 L 417.38,171.28 L 415.66,181.34 L 412.65,190.98 L 408.44,200.02 L 403.13,208.33 L 396.83,215.76 L 389.69,222.22 L 381.85,227.6 L 373.47,231.84 L 364.7,234.89 L 355.73,236.72 L 346.7,237.33 L 337.79,236.74 L 329.15,235 L 320.94,232.15 L 313.27,228.29 L 306.29,223.51 L 300.09,217.92 L 294.77,211.63 L 290.4,204.8 L 287.03,197.54 L 284.69,190.02 L 283.4,182.36 L 283.14,174.71 L 283.9,167.21 L 285.63,160 L 288.26,153.19 L 291.73,146.89 L 295.94,141.21 L 300.79,136.23 L 306.17,132.01 L 311.98,128.62 L 318.07,126.07 L 324.35,124.4 L 330.67,123.6 L 336.93,123.66 L 343.01,124.54 L 348.81,126.2 L 354.22,128.58 L 359.16,131.61 L 363.56,135.21 L 367.36,139.28 L 370.5,143.73 L 372.96,148.47 L 374.71,153.38 L 375.76,158.38 L 376.11,163.36 L 375.79,168.22 L 374.83,172.89 L 373.28,177.27 L 371.2,181.29 L 368.65,184.9 L 365.71,188.04 L 362.46,190.67 L 358.97,192.78 L 355.33,194.33 L 351.62,195.34 L 347.91,195.8 L 344.3,195.75 L 340.83,195.21 L 337.59,194.22 L 334.62,192.83 L 331.97,191.09 L 329.68,189.07 L 327.77,186.83 L 326.27,184.43 L 325.18,181.94 L 324.49,179.42 L 324.19,176.93 L 324.26,174.54 L 324.68,172.3 L 325.39,170.24 L 326.37,168.41 L 327.55,166.85 L 328.9,165.56 L 330.35,164.57 L 331.86,163.88 L 333.37,163.47 L 334.83,163.35 L 336.2,163.49 L 337.43,163.86 L 338.49,164.43 L 339.36,165.16 L 340,166"/>
+<circle fill="#3C3489" cx="340" cy="82" r="7"/>
+<circle fill="#3C3489" cx="405" cy="206" r="7"/>
+<circle fill="#3C3489" cx="283" cy="181" r="7"/>
+<circle fill="#3C3489" cx="366" cy="138" r="7"/>
+<circle fill="#3C3489" cx="334" cy="193" r="7"/>
+<circle fill="#D85A30" cx="340" cy="170" r="11"/>
+<text x="340" y="335" text-anchor="middle" font-family="Georgia, 'Iowan Old Style', 'Charter', serif" font-size="68" font-weight="400" fill="#3C3489" letter-spacing="0.005em">ariadne</text>
+<text x="340" y="380" text-anchor="middle" font-family="-apple-system, 'Segoe UI', sans-serif" font-size="13" font-weight="400" fill="#888780" letter-spacing="3.9">the thread through your codebase</text>
+</svg>

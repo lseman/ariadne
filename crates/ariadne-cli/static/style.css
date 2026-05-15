@@ -1,0 +1,66 @@
+body {
+  margin: 0;
+  font: 13px system-ui, sans-serif;
+  color: #18202a;
+  background: #f8f9fb;
+}
+
+#bar {
+  height: 48px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 0 14px;
+  border-bottom: 1px solid #d7dce2;
+  background: white;
+}
+
+#q {
+  width: 320px;
+  padding: 8px 10px;
+  border: 1px solid #bec7d0;
+  border-radius: 6px;
+}
+
+#legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  border: 1px solid #ccd3da;
+  background: #fff;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.chip.off {
+  opacity: .35;
+}
+
+svg {
+  display: block;
+  width: 100vw;
+  height: calc(100vh - 48px);
+}
+
+.link {
+  stroke: #9aa7b3;
+  stroke-opacity: .45;
+}
+
+.node {
+  stroke: #fff;
+  stroke-width: 1.5px;
+  cursor: pointer;
+}
+
+text {
+  pointer-events: none;
+  fill: #1d2935;
+  paint-order: stroke;
+  stroke: #fff;
+  stroke-width: 3px;
+}

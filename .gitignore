@@ -1,0 +1,11 @@
+/target
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+# Added by code-review-graph
+.code-review-graph/
+AGENTS.md
+.mcp.json
+.ariadneignore
+code-review-graph/

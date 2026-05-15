@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ariadne-core",
+    "crates/ariadne-extract",
+    "crates/ariadne-store",
+    "crates/ariadne-query",
+    "crates/ariadne-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Laio Oriel Seman"]
+description = "A graph-based semantic system for code, documents, and diagrams."
+repository = "https://github.com/lseman/ariadne"
+homepage = "https://github.com/lseman/ariadne"
+readme = "README.md"
+rust-version = "1.75"
+
+[workspace.dependencies]
+ariadne-core = { version = "0.1.0", path = "crates/ariadne-core" }
+ariadne-extract = { version = "0.1.0", path = "crates/ariadne-extract" }
+ariadne-store = { version = "0.1.0", path = "crates/ariadne-store" }
+ariadne-query = { version = "0.1.0", path = "crates/ariadne-query" }
+
+petgraph = "0.6"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tree-sitter = "0.20"
+tree-sitter-rust = "0.20"
+tree-sitter-python = "0.20"
+tree-sitter-cpp = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+clap = { version = "=4.4.18", features = ["derive"] }
+walkdir = "2"
+rayon = "1"
+sha2 = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

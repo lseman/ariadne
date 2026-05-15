@@ -1,0 +1,29 @@
+[package]
+name = "ariadne-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ariadne-cli"
+readme.workspace = true
+rust-version.workspace = true
+description = "Command-line interface for Ariadne."
+
+[[bin]]
+name = "ariadne"
+path = "src/main.rs"
+
+[dependencies]
+ariadne-core    = { workspace = true }
+ariadne-extract = { workspace = true }
+ariadne-store   = { workspace = true }
+ariadne-query   = { workspace = true }
+clap            = { workspace = true }
+anyhow          = { workspace = true }
+tracing         = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json      = { workspace = true }
+sha2            = { workspace = true }
+walkdir         = { workspace = true }
