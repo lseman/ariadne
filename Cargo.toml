@@ -1,11 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/ariadne-core",
-    "crates/ariadne-extract",
-    "crates/ariadne-store",
-    "crates/ariadne-query",
-    "crates/ariadne-cli",
+    "crates/ariadne-graph",
 ]
 
 [workspace.package]
@@ -20,11 +16,6 @@ readme = "README.md"
 rust-version = "1.75"
 
 [workspace.dependencies]
-ariadne-core = { version = "0.1.0", path = "crates/ariadne-core" }
-ariadne-extract = { version = "0.1.0", path = "crates/ariadne-extract" }
-ariadne-store = { version = "0.1.0", path = "crates/ariadne-store" }
-ariadne-query = { version = "0.1.0", path = "crates/ariadne-query" }
-
 petgraph = "0.6"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tree-sitter = "0.20"
