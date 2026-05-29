@@ -40,7 +40,7 @@ pub fn is_test_file_path(path: &Path) -> bool {
         || stem.ends_with("_test")          // Go/Rust: foo_test.go, foo_test.rs
         || stem.ends_with("_spec")          // Ruby/RSpec convention
         || stem.ends_with(".test")          // JS/TS: foo.test.ts
-        || stem.ends_with(".spec")          // JS/TS: foo.spec.ts
+        || stem.ends_with(".spec") // JS/TS: foo.spec.ts
 }
 
 /// Test the *symbol name*. True if the function/method name follows a
@@ -105,7 +105,9 @@ mod tests {
 
     #[test]
     fn detects_rust_and_go_test_files() {
-        assert!(is_test_file_path(&PathBuf::from("crates/foo/tests/integration.rs")));
+        assert!(is_test_file_path(&PathBuf::from(
+            "crates/foo/tests/integration.rs"
+        )));
         assert!(is_test_file_path(&PathBuf::from("pkg/foo_test.go")));
         assert!(is_test_file_path(&PathBuf::from("src/auth_test.rs")));
         assert!(!is_test_file_path(&PathBuf::from("src/auth.rs")));
@@ -128,8 +130,8 @@ mod tests {
         assert!(is_test_name("itReturnsNullForMissingUser"));
         assert!(!is_test_name("login"));
         // Common false-positive risks we explicitly avoid:
-        assert!(!is_test_name("Test"));        // bare Test is often a type
-        assert!(!is_test_name("Testimony"));   // doesn't follow Test[A-Z]
-        assert!(!is_test_name("should"));      // bare verb
+        assert!(!is_test_name("Test")); // bare Test is often a type
+        assert!(!is_test_name("Testimony")); // doesn't follow Test[A-Z]
+        assert!(!is_test_name("should")); // bare verb
     }
 }

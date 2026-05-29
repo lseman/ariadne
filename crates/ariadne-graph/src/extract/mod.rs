@@ -30,5 +30,5 @@ pub use flows::{
 };
 pub use walker::{
     derive_tested_by_edges, extract_directory, extract_file, ignore_set, is_supported,
-    resolve_call_placeholders, IgnoreSet,
+    resolve_call_placeholders, should_suppress_call_placeholder, IgnoreSet,
 };

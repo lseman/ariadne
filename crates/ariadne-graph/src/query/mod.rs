@@ -25,7 +25,8 @@ pub mod structure;
 
 pub use centrality::{pagerank, personalized_pagerank};
 pub use communities::{
-    leiden, leiden_with_options, louvain, louvain_with_options, CommunityOptions,
+    community_quality, leiden, leiden_with_options, louvain, louvain_with_options,
+    CommunityObjective, CommunityOptions, CommunityQuality,
 };
 pub use differential::{
     is_active_at, temporal_diff, ChangedEdge, TemporalChangeKind, TemporalDiff,

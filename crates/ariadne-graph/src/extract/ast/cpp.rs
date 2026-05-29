@@ -4,9 +4,10 @@
 //! file, namespace/module, class/type, function/method, import/include,
 //! inheritance, and call edges.
 
-use anyhow::Result;
 use crate::core::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
+use crate::extract::should_suppress_call_placeholder;
 use crate::extract::test_detect::{is_test_file_path, is_test_name};
+use anyhow::Result;
 use std::fs;
 use std::path::Path;
 use tree_sitter::{Parser, Query, QueryCursor};
@@ -113,7 +114,8 @@ fn walk_scope(
             }
             "function_definition" => {
                 if let Some((name, declarator)) = function_name(child, source) {
-                    let is_test = file_is_test || is_test_name(name.rsplit("::").next().unwrap_or(&name));
+                    let is_test =
+                        file_is_test || is_test_name(name.rsplit("::").next().unwrap_or(&name));
                     let qn = if name.contains("::") {
                         format!("{}::{}", file_qn, name)
                     } else {
@@ -142,7 +144,14 @@ fn walk_scope(
                 }
             }
             "declaration" => emit_declaration_function(
-                child, source, graph, file_uri, file_qn, parent_id, &scope, file_is_test,
+                child,
+                source,
+                graph,
+                file_uri,
+                file_qn,
+                parent_id,
+                &scope,
+                file_is_test,
             ),
             _ => {
                 if child.is_named() {
@@ -256,6 +265,9 @@ fn emit_calls(node: tree_sitter::Node, source: &str, graph: &mut Graph, caller: 
         if n.kind() == "call_expression" {
             if let Some(func) = n.child_by_field_name("function") {
                 if let Some(name) = call_target_name(func, source) {
+                    if should_suppress_call_placeholder(&name) {
+                        continue;
+                    }
                     let callee_id =
                         graph.add_node(Node::new(NodeKind::Function, format!("call::{}", name)));
                     graph.add_edge(caller, callee_id, Edge::ambiguous(EdgeKind::Calls));

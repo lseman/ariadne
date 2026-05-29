@@ -160,7 +160,7 @@ impl<'a> App<'a> {
             self.s_detail.clear();
             return;
         };
-        self.s_detail = build_node_detail(self.graph, hit.id);
+        self.s_detail = build_node_detail(self.graph, hit.id, Some(&hit.signals));
         self.s_scroll = 0;
     }
 
@@ -201,7 +201,7 @@ impl<'a> App<'a> {
         let Some(&(id, _, _)) = self.b_nodes.get(idx) else {
             return;
         };
-        self.b_detail = build_node_detail(self.graph, id);
+        self.b_detail = build_node_detail(self.graph, id, None);
         self.b_scroll = 0;
     }
 
@@ -473,7 +473,11 @@ impl<'a> App<'a> {
 
 // ── node detail builder ───────────────────────────────────────────────────────
 
-fn build_node_detail(graph: &Graph, id: NodeId) -> Vec<Line<'static>> {
+fn build_node_detail(
+    graph: &Graph,
+    id: NodeId,
+    search_signals: Option<&[&'static str]>,
+) -> Vec<Line<'static>> {
     let Some(node) = graph.node(id) else {
         return vec![];
     };
@@ -492,6 +496,15 @@ fn build_node_detail(graph: &Graph, id: NodeId) -> Vec<Line<'static>> {
         Span::styled(kind_label(node.kind), kind_style(node.kind)),
     ]));
 
+    if let Some(signals) = search_signals {
+        if !signals.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("Signals: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(signals.join(", "), Style::default().fg(Color::LightCyan)),
+            ]));
+        }
+    }
+
     // Source location
     if let Some(src) = &node.source_uri {
         let loc = if let Some(ls) = node.line_start {
@@ -503,6 +516,39 @@ fn build_node_detail(graph: &Graph, id: NodeId) -> Vec<Line<'static>> {
             Span::styled("Source:  ", Style::default().fg(Color::DarkGray)),
             Span::styled(loc, Style::default().fg(Color::Blue)),
         ]));
+    }
+
+    lines.push(Line::default());
+
+    let tests: Vec<_> = graph
+        .out_neighbors(id)
+        .filter(|(_, edge)| edge.kind == EdgeKind::TestedBy)
+        .filter_map(|(test_id, _)| graph.node(test_id).map(|node| node.qualified_name.clone()))
+        .collect();
+    lines.push(Line::from(Span::styled(
+        format!("── Tests ({}) ───────────────", tests.len()),
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    )));
+    if tests.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no direct TestedBy coverage)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for test in tests.iter().take(10) {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(test.clone(), Style::default().fg(Color::Green)),
+            ]));
+        }
+        if tests.len() > 10 {
+            lines.push(Line::from(Span::styled(
+                format!("  … {} more", tests.len() - 10),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
     }
 
     lines.push(Line::default());

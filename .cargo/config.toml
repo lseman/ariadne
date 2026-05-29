@@ -1,0 +1,6 @@
+[env]
+# System-wide CFLAGS with GCC LTO (for example `-flto=auto`) make bundled
+# C archives from libsqlite3-sys/tree-sitter unreadable to rust-lld, which
+# surfaces as missing sqlite3_* and ts_* symbols at link time.
+CFLAGS = { value = "", force = true }
+CXXFLAGS = { value = "", force = true }

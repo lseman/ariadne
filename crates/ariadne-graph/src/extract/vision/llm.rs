@@ -13,8 +13,8 @@
 //! Everything in this module is gated behind the (yet to be added)
 //! `vision-api` feature.
 
-use anyhow::Result;
 use crate::core::Graph;
+use anyhow::Result;
 use std::path::Path;
 
 pub fn extract_file(_path: &Path, _graph: &mut Graph) -> Result<()> {

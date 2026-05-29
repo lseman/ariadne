@@ -4,8 +4,8 @@
 //! node per non-empty `<text>` element it contains. Concept → symbol
 //! cross-linking is delegated to the resolver also used by markdown.
 
-use anyhow::Result;
 use crate::core::{Edge, EdgeKind, Graph, Node, NodeKind};
+use anyhow::Result;
 use std::fs;
 use std::path::Path;
 

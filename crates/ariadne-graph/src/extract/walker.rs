@@ -1,46 +1,33 @@
-use anyhow::Result;
 use crate::core::{Edge, EdgeKind, Graph, NodeKind};
+use anyhow::Result;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone)]
 pub struct IgnoreSet {
-    root: std::path::PathBuf,
-    patterns: Vec<String>,
+    matcher: ignore::gitignore::Gitignore,
 }
 
 impl IgnoreSet {
     pub fn load(root: &Path) -> Self {
-        let mut patterns = Vec::new();
-        patterns.extend(read_ignore_file(&root.join(".gitignore")));
-        patterns.extend(read_ignore_file(&root.join(".ariadneignore")));
-        Self {
-            root: root.to_path_buf(),
-            patterns,
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+        for ignore_file in [".gitignore", ".ariadneignore"] {
+            if let Some(err) = builder.add(root.join(ignore_file)) {
+                tracing::warn!("failed to load {}: {}", ignore_file, err);
+            }
         }
+        let matcher = builder.build().unwrap_or_else(|err| {
+            tracing::warn!("failed to build ignore matcher: {}", err);
+            ignore::gitignore::Gitignore::empty()
+        });
+        Self { matcher }
     }
 
     pub fn is_ignored(&self, path: &Path) -> bool {
-        let rel = path.strip_prefix(&self.root).unwrap_or(path);
-        let rel = rel.to_string_lossy().replace('\\', "/");
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        default_ignored_name(name) || self.patterns.iter().any(|p| matches_pattern(&rel, name, p))
+        default_ignored_name(name) || self.matcher.matched(path, path.is_dir()).is_ignore()
     }
-}
-
-fn read_ignore_file(path: &Path) -> Vec<String> {
-    fs::read_to_string(path)
-        .ok()
-        .map(|text| {
-            text.lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('!'))
-                .map(|line| line.trim_start_matches("./").to_string())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Walk `root` and dispatch each supported file to the right pass.
@@ -145,6 +132,9 @@ pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
         let Some(name) = callee.qualified_name.strip_prefix("call::") else {
             continue;
         };
+        if should_suppress_call_placeholder(name) {
+            continue;
+        }
         let Some(candidates) = by_name.get(name) else {
             continue;
         };
@@ -191,6 +181,95 @@ pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
     count
 }
 
+pub fn should_suppress_call_placeholder(name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        // Python builtins and common constructors.
+        "abs"
+            | "all"
+            | "any"
+            | "bool"
+            | "bytes"
+            | "callable"
+            | "dict"
+            | "dir"
+            | "enumerate"
+            | "filter"
+            | "float"
+            | "getattr"
+            | "hasattr"
+            | "hash"
+            | "id"
+            | "int"
+            | "isinstance"
+            | "iter"
+            | "len"
+            | "list"
+            | "map"
+            | "max"
+            | "min"
+            | "next"
+            | "open"
+            | "print"
+            | "range"
+            | "repr"
+            | "reversed"
+            | "round"
+            | "set"
+            | "sorted"
+            | "str"
+            | "sum"
+            | "super"
+            | "tuple"
+            | "type"
+            | "vars"
+            | "zip"
+            // Rust/std/common fluent API calls that otherwise dominate
+            // unresolved call nodes.
+            | "as_ref"
+            | "as_str"
+            | "clone"
+            | "collect"
+            | "contains"
+            | "count"
+            | "default"
+            | "expect"
+            | "find"
+            | "first"
+            | "from"
+            | "get"
+            | "insert"
+            | "into"
+            | "is_empty"
+            | "last"
+            | "new"
+            | "ok"
+            | "or_default"
+            | "push"
+            | "push_str"
+            | "to_string"
+            | "unwrap"
+            | "unwrap_or"
+            | "unwrap_or_default"
+            | "with_capacity"
+            // C/C++ and libc-style calls.
+            | "malloc"
+            | "free"
+            | "printf"
+            | "fprintf"
+            | "memcpy"
+            | "memset"
+            | "strlen"
+            | "strcmp"
+            | "std"
+    )
+}
+
 /// Reverse every `test_fn -[Calls]-> production_fn` edge into a
 /// `production_fn -[TestedBy]-> test_fn` edge.
 ///
@@ -217,8 +296,12 @@ pub fn derive_tested_by_edges(graph: &mut Graph) -> usize {
         if edge.kind != EdgeKind::Calls {
             continue;
         }
-        let Some(src_node) = graph.node(src) else { continue };
-        let Some(dst_node) = graph.node(dst) else { continue };
+        let Some(src_node) = graph.node(src) else {
+            continue;
+        };
+        let Some(dst_node) = graph.node(dst) else {
+            continue;
+        };
         if !is_test_node(src_node) {
             continue;
         }
@@ -256,47 +339,6 @@ fn default_ignored_name(name: &str) -> bool {
         || matches!(name, "target" | "node_modules" | "__pycache__")
 }
 
-fn matches_pattern(rel: &str, name: &str, pattern: &str) -> bool {
-    let pattern = pattern.trim();
-    if pattern.is_empty() {
-        return false;
-    }
-    let pattern = pattern.trim_end_matches('/');
-    if pattern.contains('*') {
-        return glob_match(pattern, rel) || glob_match(pattern, name);
-    }
-    rel == pattern
-        || name == pattern
-        || rel.starts_with(&format!("{}/", pattern))
-        || rel.contains(&format!("/{}", pattern))
-}
-
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() == 1 {
-        return pattern == text;
-    }
-    let mut cursor = 0usize;
-    for (i, part) in parts.iter().enumerate() {
-        if part.is_empty() {
-            continue;
-        }
-        let Some(found) = text[cursor..].find(part) else {
-            return false;
-        };
-        if i == 0 && !pattern.starts_with('*') && found != 0 {
-            return false;
-        }
-        cursor += found + part.len();
-    }
-    if !pattern.ends_with('*') {
-        if let Some(last) = parts.last() {
-            return text.ends_with(last);
-        }
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +352,74 @@ mod tests {
 
     fn make_fn(graph: &mut Graph, qname: &str) -> crate::core::NodeId {
         graph.add_node(Node::new(NodeKind::Function, qname))
+    }
+
+    #[test]
+    fn extract_directory_honors_gitignore() {
+        let dir = std::env::temp_dir().join(format!(
+            "ariadne_gitignore_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/generated")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "src/generated/\n").unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+        std::fs::write(
+            dir.join("src/generated/ignored.rs"),
+            "pub fn ignored() {}\n",
+        )
+        .unwrap();
+
+        let mut graph = Graph::new();
+        let count = extract_directory(&dir, &mut graph).unwrap();
+        assert_eq!(count, 1);
+        assert!(graph
+            .nodes()
+            .any(|(_, n)| n.qualified_name.ends_with("::kept")));
+        assert!(
+            graph
+                .nodes()
+                .all(|(_, n)| !n.qualified_name.ends_with("::ignored")),
+            ".gitignore entries should be excluded from extraction"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn extract_directory_honors_ariadneignore() {
+        let dir = std::env::temp_dir().join(format!(
+            "ariadne_ariadneignore_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/scratch")).unwrap();
+        std::fs::write(dir.join(".ariadneignore"), "src/scratch/*.rs\n").unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+        std::fs::write(dir.join("src/scratch/noisy.rs"), "pub fn noisy() {}\n").unwrap();
+
+        let mut graph = Graph::new();
+        let count = extract_directory(&dir, &mut graph).unwrap();
+        assert_eq!(count, 1);
+        assert!(graph
+            .nodes()
+            .any(|(_, n)| n.qualified_name.ends_with("::kept")));
+        assert!(
+            graph
+                .nodes()
+                .all(|(_, n)| !n.qualified_name.ends_with("::noisy")),
+            ".ariadneignore entries should be excluded from extraction"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -357,10 +467,8 @@ mod tests {
         // of the item they decorate, not as children. Regression test
         // for a bug where the detector walked children and missed every
         // real-world test function.
-        let dir = std::env::temp_dir().join(format!(
-            "ariadne_rust_test_detect_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ariadne_rust_test_detect_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
 
@@ -392,28 +500,33 @@ mod tests {
 
         let test_fn = graph
             .nodes()
-            .find(|(_, n)| n.qualified_name.ends_with("::tests::test_login_accepts_alice"))
+            .find(|(_, n)| {
+                n.qualified_name
+                    .ends_with("::tests::test_login_accepts_alice")
+            })
             .map(|(_, n)| n)
             .expect("test function must be extracted");
         assert_eq!(
-            test_fn
-                .properties
-                .get("is_test")
-                .and_then(|v| v.as_bool()),
+            test_fn.properties.get("is_test").and_then(|v| v.as_bool()),
             Some(true),
             "#[cfg(test)] mod + #[test] function must be marked is_test"
         );
 
         let login = graph
             .nodes()
-            .find(|(_, n)| n.qualified_name.ends_with("::login") && !n.qualified_name.starts_with("call::"))
+            .find(|(_, n)| {
+                n.qualified_name.ends_with("::login") && !n.qualified_name.starts_with("call::")
+            })
             .map(|(id, _)| id)
             .expect("login must be extracted");
         let outgoing: Vec<_> = graph
             .out_neighbors(login)
             .map(|(n, e)| {
                 (
-                    graph.node(n).map(|x| x.qualified_name.clone()).unwrap_or_default(),
+                    graph
+                        .node(n)
+                        .map(|x| x.qualified_name.clone())
+                        .unwrap_or_default(),
                     e.kind,
                 )
             })
@@ -439,10 +552,7 @@ mod tests {
         // and producing spurious orphan flows. The fix qualifies it
         // as `outer::helper` and keeps its kind as Function (it's not
         // a method just because it lives inside another fn).
-        let dir = std::env::temp_dir().join(format!(
-            "ariadne_nested_fn_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ariadne_nested_fn_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
@@ -472,12 +582,9 @@ pub fn outer() -> u32 {
         // And it must NOT also be registered as a bare top-level
         // `helper`: if both forms coexisted the resolver could pick
         // either and the bug would resurface.
-        let bare = graph
-            .nodes()
-            .find(|(_, n)| {
-                n.qualified_name.ends_with("/lib.rs::helper")
-                    && !n.qualified_name.starts_with("call::")
-            });
+        let bare = graph.nodes().find(|(_, n)| {
+            n.qualified_name.ends_with("/lib.rs::helper") && !n.qualified_name.starts_with("call::")
+        });
         assert!(
             bare.is_none(),
             "helper must not be emitted at file-top-level qname"
@@ -487,7 +594,9 @@ pub fn outer() -> u32 {
         // file-local resolution since their `name` matches).
         let outer = graph
             .nodes()
-            .find(|(_, n)| n.qualified_name.ends_with("::outer") && !n.qualified_name.contains("helper"))
+            .find(|(_, n)| {
+                n.qualified_name.ends_with("::outer") && !n.qualified_name.contains("helper")
+            })
             .map(|(id, _)| id)
             .expect("outer must be extracted");
         let resolved_to_helper = graph
@@ -507,10 +616,7 @@ pub fn outer() -> u32 {
         // `shared()` from inside file_a must resolve to file_a's
         // copy, not file_b's. The pre-fix resolver bailed entirely
         // when more than one candidate existed.
-        let dir = std::env::temp_dir().join(format!(
-            "ariadne_file_local_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ariadne_file_local_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
@@ -545,12 +651,18 @@ pub fn entry_b() -> u32 { shared() }
             .expect("entry_b must be extracted");
         let shared_a = graph
             .nodes()
-            .find(|(_, n)| n.qualified_name.ends_with("/a.rs::shared") && !n.qualified_name.starts_with("call::"))
+            .find(|(_, n)| {
+                n.qualified_name.ends_with("/a.rs::shared")
+                    && !n.qualified_name.starts_with("call::")
+            })
             .map(|(id, _)| id)
             .expect("a.rs::shared must be extracted");
         let shared_b = graph
             .nodes()
-            .find(|(_, n)| n.qualified_name.ends_with("/b.rs::shared") && !n.qualified_name.starts_with("call::"))
+            .find(|(_, n)| {
+                n.qualified_name.ends_with("/b.rs::shared")
+                    && !n.qualified_name.starts_with("call::")
+            })
             .map(|(id, _)| id)
             .expect("b.rs::shared must be extracted");
 
@@ -589,15 +701,17 @@ pub fn entry_b() -> u32 { shared() }
         // End-to-end on a temp dir: ensure that test detection in the
         // extractor + placeholder resolution + TestedBy derivation
         // compose correctly without us having to set is_test manually.
-        let dir = std::env::temp_dir().join(format!(
-            "ariadne_test_pipeline_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ariadne_test_pipeline_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("tests")).unwrap();
 
-        std::fs::write(dir.join("src/auth.py"), "def login(user):\n    return user\n").unwrap();
+        std::fs::write(
+            dir.join("src/auth.py"),
+            "def login(user):\n    return user\n",
+        )
+        .unwrap();
         std::fs::write(
             dir.join("tests/test_auth.py"),
             "def test_login():\n    login('alice')\n",
@@ -634,7 +748,10 @@ pub fn entry_b() -> u32 { shared() }
             "TestedBy must point at the test function"
         );
         assert_eq!(
-            test_node.properties.get("is_test").and_then(|v| v.as_bool()),
+            test_node
+                .properties
+                .get("is_test")
+                .and_then(|v| v.as_bool()),
             Some(true),
             "test function must carry is_test=true"
         );
@@ -655,7 +772,10 @@ pub fn entry_b() -> u32 { shared() }
         g.add_edge(test_a, prod_fn, Edge::extracted(EdgeKind::Calls));
 
         let added = derive_tested_by_edges(&mut g);
-        assert_eq!(added, 1, "only the test→production call should yield a TestedBy edge");
+        assert_eq!(
+            added, 1,
+            "only the test→production call should yield a TestedBy edge"
+        );
 
         // Placeholder should not appear as a TestedBy *source* (nothing
         // is "tested by" a placeholder), nor as a target (we skip them).
@@ -671,5 +791,26 @@ pub fn entry_b() -> u32 { shared() }
             .filter(|(_, e)| e.kind == EdgeKind::TestedBy)
             .collect();
         assert!(test_b_incoming.is_empty());
+    }
+
+    #[test]
+    fn suppresses_low_signal_call_placeholders_before_resolution() {
+        assert!(should_suppress_call_placeholder("len"));
+        assert!(should_suppress_call_placeholder("unwrap_or"));
+        assert!(should_suppress_call_placeholder("printf"));
+        assert!(!should_suppress_call_placeholder(
+            "resolve_call_placeholders"
+        ));
+
+        let mut g = Graph::new();
+        let caller = make_fn(&mut g, "src::caller");
+        let placeholder = make_fn(&mut g, "call::len");
+        let real_len = make_fn(&mut g, "src::len");
+        g.add_edge(caller, placeholder, Edge::ambiguous(EdgeKind::Calls));
+
+        assert_eq!(resolve_call_placeholders(&mut g), 0);
+        assert!(g
+            .out_neighbors(caller)
+            .all(|(dst, edge)| dst != real_len || edge.kind != EdgeKind::Calls));
     }
 }

@@ -4,8 +4,8 @@
 //! `Document` and `Section` (from `\section{...}`) nodes and cross-link
 //! `\verb|...|` or `\texttt{...}` tokens to code symbols.
 
-use anyhow::Result;
 use crate::core::Graph;
+use anyhow::Result;
 use std::path::Path;
 
 pub fn extract_file(_path: &Path, _graph: &mut Graph) -> Result<()> {

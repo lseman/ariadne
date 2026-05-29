@@ -42,8 +42,16 @@ impl Graph {
         self.inner.node_weight(NodeIndex::new(id.0 as usize))
     }
 
+    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        self.inner.node_weight_mut(NodeIndex::new(id.0 as usize))
+    }
+
     pub fn edge(&self, id: EdgeId) -> Option<&Edge> {
         self.inner.edge_weight(EdgeIndex::new(id.0 as usize))
+    }
+
+    pub fn edge_mut(&mut self, id: EdgeId) -> Option<&mut Edge> {
+        self.inner.edge_weight_mut(EdgeIndex::new(id.0 as usize))
     }
 
     pub fn find_by_qname(&self, qname: &str) -> Option<NodeId> {

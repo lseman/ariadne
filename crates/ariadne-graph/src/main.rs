@@ -1,19 +1,24 @@
 use anyhow::{bail, Result};
 use ariadne_graph::extract::{
-    extract_directory, extract_file, ignore_set, is_supported, resolve_call_placeholders,
+    compute_flows, derive_tested_by_edges, extract_directory, extract_file, ignore_set,
+    is_supported, resolve_call_placeholders,
 };
 use ariadne_graph::query::{
-    analyze_impact, articulation_points, bridge_scores, callees_of, callers_of, core_numbers,
-    cyclic_components, find_top_paths, fts_ranked_search, leiden, louvain, pagerank,
-    paths::PathQuery, personalized_pagerank, ranked_search, search_by_name, temporal_diff,
-    ImpactQuery, TemporalDiff,
+    analyze_impact, articulation_points, bridge_scores, callees_of, callers_of, community_quality,
+    core_numbers, cyclic_components, find_top_paths, fts_ranked_search, is_active_at, leiden,
+    leiden_with_options, louvain, louvain_with_options, pagerank, paths::PathQuery,
+    personalized_pagerank, ranked_search, search_by_name, CommunityObjective, CommunityOptions,
+    ImpactQuery,
 };
-use ariadne_graph::store::Store;
+use ariadne_graph::store::{
+    edge_identity, Store, StoredEdgeRow, StoredNodeRow, DEFAULT_EMBEDDING_MODEL,
+};
 use ariadne_graph::{Graph, NodeId, NodeKind};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -81,6 +86,11 @@ enum Commands {
     },
     /// Show graph statistics.
     Status,
+    /// Report graph health, index coverage, and noise signals as JSON.
+    Diagnostics {
+        #[arg(long, default_value_t = 25)]
+        top: usize,
+    },
     /// Find paths between two symbols.
     Paths {
         from: String,
@@ -113,6 +123,15 @@ enum Commands {
         max_depth: usize,
         #[arg(long)]
         brief: bool,
+    },
+    /// Summarize changed and impacted functions, classes, and files.
+    BlastRadius {
+        #[arg(long, default_value = "HEAD~1")]
+        base: String,
+        #[arg(long, default_value_t = 2)]
+        max_depth: usize,
+        #[arg(long, default_value_t = 25)]
+        top: usize,
     },
     /// Token-budgeted review context for changed and impacted files.
     ReviewContext {
@@ -172,10 +191,38 @@ enum Commands {
         #[arg(long, default_value_t = 10)]
         top: usize,
     },
+    /// Compare naive source-reading tokens to graph-query tokens.
+    TokenBenchmark {
+        #[arg(long, default_value = "HEAD~1")]
+        base: String,
+        #[arg(long, default_value_t = 1600)]
+        token_budget: usize,
+        #[arg(long, default_value_t = 200)]
+        max_lines_per_file: usize,
+    },
+    /// Rank unexpected cross-community, cross-language, and hub-coupling edges.
+    Surprises {
+        #[arg(long, default_value_t = 25)]
+        top: usize,
+    },
     /// Summarize communities, bridges, and coupling at architecture level.
     Architecture {
         #[arg(long, default_value = "standard")]
         detail_level: String,
+    },
+    /// Export the graph as graphml, cypher, or obsidian markdown.
+    Export { format: String, output: PathBuf },
+    /// Generate a markdown wiki from community structure.
+    Wiki {
+        output: PathBuf,
+        #[arg(long, default_value_t = 25)]
+        top: usize,
+    },
+    /// Generate a review-ready markdown graph report.
+    Report {
+        output: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        top: usize,
     },
     /// One-operation JSON interface for agents and MCP wrappers.
     Tool {
@@ -202,6 +249,24 @@ enum Commands {
         /// Community algorithm: louvain or leiden.
         #[arg(long, default_value = "louvain")]
         algorithm: String,
+        /// Modularity resolution; higher values produce smaller communities.
+        #[arg(long, default_value_t = 1.0)]
+        resolution: f32,
+        /// Leiden well-connectedness strictness; 0 disables the gate.
+        #[arg(long, default_value_t = 1.0)]
+        well_connectedness: f32,
+        /// Maximum local-move sweeps per hierarchy level.
+        #[arg(long, default_value_t = 50)]
+        max_passes: usize,
+        /// Maximum aggregation levels.
+        #[arg(long, default_value_t = 10)]
+        max_levels: usize,
+        /// Disable parallel Leiden refinement for deterministic debugging.
+        #[arg(long)]
+        no_parallel: bool,
+        /// Community objective used for scoring: modularity or cpm.
+        #[arg(long, default_value = "modularity")]
+        objective: String,
     },
     /// List execution flows ranked by criticality.
     Flows {
@@ -215,6 +280,29 @@ enum Commands {
         #[arg(long, default_value_t = 10)]
         top: usize,
     },
+    /// Report direct and nearby test coverage for a symbol or recent changes.
+    TestCoverage {
+        /// Specific symbol to inspect. If omitted, inspect changed callables since `--base`.
+        target: Option<String>,
+        #[arg(long, default_value = "HEAD~1")]
+        base: String,
+    },
+    /// Diff two graph snapshots using temporal validity windows.
+    GraphDiff {
+        #[arg(long, default_value = "HEAD~1")]
+        base: String,
+        #[arg(long, default_value = "HEAD")]
+        head: String,
+        #[arg(long, default_value_t = 50)]
+        top: usize,
+    },
+    /// Build optional local embeddings for semantic search.
+    Embed {
+        #[arg(long, default_value = DEFAULT_EMBEDDING_MODEL)]
+        model: String,
+    },
+    /// Rebuild the SQLite FTS5 node search index.
+    RebuildFts,
     /// Search nodes by name.
     Search { query: String },
     /// Launch the interactive terminal UI.
@@ -269,6 +357,7 @@ fn main() -> Result<()> {
             cmd_serve(&cli.db, &bind, &algorithm)
         }
         Commands::Status => cmd_status(&cli.db),
+        Commands::Diagnostics { top } => cmd_diagnostics(&cli.db, top),
         Commands::Paths {
             from,
             to,
@@ -288,6 +377,11 @@ fn main() -> Result<()> {
             max_depth,
             brief,
         } => cmd_detect_changes(&cli.db, &base, max_depth, brief),
+        Commands::BlastRadius {
+            base,
+            max_depth,
+            top,
+        } => cmd_blast_radius(&cli.db, &base, max_depth, top),
         Commands::ReviewContext {
             base,
             max_lines_per_file,
@@ -306,14 +400,50 @@ fn main() -> Result<()> {
         Commands::Articulation { top } => cmd_articulation(&cli.db, top),
         Commands::Gaps { top } => cmd_gaps(&cli.db, top),
         Commands::SuggestedQuestions { base, top } => cmd_suggested_questions(&cli.db, &base, top),
+        Commands::TokenBenchmark {
+            base,
+            token_budget,
+            max_lines_per_file,
+        } => cmd_token_benchmark(&cli.db, &base, token_budget, max_lines_per_file),
+        Commands::Surprises { top } => cmd_surprises(&cli.db, top),
         Commands::Architecture { detail_level } => cmd_architecture(&cli.db, &detail_level),
+        Commands::Export { format, output } => cmd_export(&cli.db, &format, &output),
+        Commands::Wiki { output, top } => cmd_wiki(&cli.db, &output, top),
+        Commands::Report { output, top } => cmd_report(&cli.db, &output, top),
         Commands::Tool { operation, params } => cmd_tool(&cli.db, &operation, &params),
         Commands::Mcp => cmd_mcp(&cli.db),
         Commands::McpServer => cmd_mcp_server(&cli.db),
         Commands::GodNodes { top, seed } => cmd_god_nodes(&cli.db, top, seed.as_deref()),
-        Commands::Communities { top, algorithm } => cmd_communities(&cli.db, top, &algorithm),
+        Commands::Communities {
+            top,
+            algorithm,
+            resolution,
+            well_connectedness,
+            max_passes,
+            max_levels,
+            no_parallel,
+            objective,
+        } => cmd_communities(
+            &cli.db,
+            top,
+            &algorithm,
+            community_options(
+                resolution,
+                well_connectedness,
+                max_passes,
+                max_levels,
+                !no_parallel,
+                parse_community_objective(&objective)?,
+            ),
+        ),
         Commands::Flows { top } => cmd_flows(&cli.db, top),
         Commands::AffectedFlows { base, top } => cmd_affected_flows(&cli.db, &base, top),
+        Commands::TestCoverage { target, base } => {
+            cmd_test_coverage(&cli.db, target.as_deref(), &base)
+        }
+        Commands::GraphDiff { base, head, top } => cmd_graph_diff(&cli.db, &base, &head, top),
+        Commands::Embed { model } => cmd_embed(&cli.db, &model),
+        Commands::RebuildFts => cmd_rebuild_fts(&cli.db),
         Commands::Search { query } => cmd_search(&cli.db, &query),
         Commands::Tui => cmd_tui(&cli.db),
     }
@@ -323,6 +453,9 @@ fn cmd_build(db: &Path, path: &Path) -> Result<()> {
     let mut graph = Graph::new();
     tracing::info!("extracting from {}", path.display());
     let n = extract_directory(path, &mut graph)?;
+    if let Some(head) = git_commit_hash("HEAD")? {
+        stamp_missing_validity(&mut graph, &head);
+    }
     tracing::info!(
         "extracted {} files: {} nodes, {} edges",
         n,
@@ -330,6 +463,7 @@ fn cmd_build(db: &Path, path: &Path) -> Result<()> {
         graph.edge_count()
     );
     let mut store = Store::open(db)?;
+    store.reset_all()?;
     store.save(&graph)?;
     let hashes = collect_file_hashes(path)?;
     store.set_file_hashes(&hashes)?;
@@ -366,6 +500,18 @@ fn cmd_update(db: &Path, path: &Path) -> Result<()> {
 
     let mut stale = changed.clone();
     stale.extend(deleted.iter().cloned());
+
+    let current_commit = git_commit_hash("HEAD")?;
+    let previous_nodes = if current_commit.is_some() {
+        store.active_nodes_for_sources(&stale)?
+    } else {
+        Vec::new()
+    };
+    let previous_edges = if current_commit.is_some() {
+        store.active_edges_for_sources(&stale)?
+    } else {
+        Vec::new()
+    };
     store.delete_sources(&stale)?;
 
     let mut graph = store.load()?;
@@ -376,6 +522,31 @@ fn cmd_update(db: &Path, path: &Path) -> Result<()> {
         }
     }
     resolve_call_placeholders(&mut graph);
+    derive_tested_by_edges(&mut graph);
+    compute_flows(&mut graph);
+
+    if let Some(commit) = current_commit.as_deref() {
+        let previous_changed_nodes = previous_nodes_for_deleted_sources(&previous_nodes, &changed);
+        let previous_changed_edges = previous_edges_for_deleted_sources(&previous_edges, &changed);
+        apply_temporal_incremental_validity(
+            &mut graph,
+            &changed,
+            &previous_changed_nodes,
+            &previous_changed_edges,
+            commit,
+        );
+        let current_node_keys = current_node_keys_for_sources(&graph, &changed);
+        let current_edge_keys = current_edge_keys_for_sources(&graph, &changed);
+        let removed_nodes = removed_nodes_for_archive(&previous_changed_nodes, &current_node_keys);
+        let removed_edges = removed_edges_for_archive(&previous_changed_edges, &current_edge_keys);
+        let deleted_nodes = previous_nodes_for_deleted_sources(&previous_nodes, &deleted);
+        let deleted_edges = previous_edges_for_deleted_sources(&previous_edges, &deleted);
+        store.archive_nodes(&removed_nodes, commit)?;
+        store.archive_nodes(&deleted_nodes, commit)?;
+        store.archive_edges(&removed_edges, commit)?;
+        store.archive_edges(&deleted_edges, commit)?;
+    }
+
     store.save(&graph)?;
     store.set_file_hashes(&current)?;
 
@@ -459,37 +630,49 @@ fn cmd_install(db: &Path, repo: &Path, force: bool, agents: bool, mcp: bool) -> 
     let db = absolute_path(db)?;
     let root = absolute_path(repo)?;
 
+    let pre_commit = format!(
+        r#"#!/bin/sh
+"{}" --db "{}" detect-changes --base HEAD --brief > "{}" 2>/dev/null || true
+exit 0
+"#,
+        exe.display(),
+        db.display(),
+        hooks_dir.join("ariadne-pre-commit.json").display()
+    );
+    write_git_hook(&hooks_dir.join("pre-commit"), &pre_commit, force)?;
+
     for hook in ["post-commit", "post-merge", "post-checkout"] {
-        let path = hooks_dir.join(hook);
-        if path.exists() && !force {
-            bail!(
-                "{} already exists; rerun with --force to replace it",
-                path.display()
-            );
-        }
         let script = format!(
             "#!/bin/sh\n\"{}\" --db \"{}\" update \"{}\" >/dev/null 2>&1 || true\n",
             exe.display(),
             db.display(),
             root.display()
         );
-        fs::write(&path, script)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
-        }
+        write_git_hook(&hooks_dir.join(hook), &script, force)?;
     }
 
-    println!(
-        "installed Ariadne auto-update hooks in {}",
-        hooks_dir.display()
-    );
+    println!("installed Ariadne git hooks in {}", hooks_dir.display());
     if agents {
         install_agents_md(repo, &db)?;
     }
     if mcp {
         install_mcp_config(repo, &db)?;
+    }
+    Ok(())
+}
+
+fn write_git_hook(path: &Path, script: &str, force: bool) -> Result<()> {
+    if path.exists() && !force {
+        bail!(
+            "{} already exists; rerun with --force to replace it",
+            path.display()
+        );
+    }
+    fs::write(path, script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     }
     Ok(())
 }
@@ -513,9 +696,30 @@ fn cmd_serve(db: &Path, bind: &str, algorithm: &str) -> Result<()> {
 fn cmd_status(db: &Path) -> Result<()> {
     let store = Store::open(db)?;
     let (n, e) = store.stats()?;
+    let fts_count = store.fts_stats()?;
+    let (embedding_count, embedding_model) = store.embedding_stats()?;
     println!("ariadne db: {}", db.display());
     println!("  nodes: {}", n);
     println!("  edges: {}", e);
+    println!("  fts5 indexed nodes: {}", fts_count);
+    println!(
+        "  embeddings: {}{}",
+        embedding_count,
+        embedding_model
+            .as_deref()
+            .map(|model| format!(" ({})", model))
+            .unwrap_or_default()
+    );
+    Ok(())
+}
+
+fn cmd_diagnostics(db: &Path, top: usize) -> Result<()> {
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+    let fts_count = store.fts_stats()?;
+    let (embedding_count, embedding_model) = store.embedding_stats()?;
+    let report = diagnostics_json(&graph, fts_count, embedding_count, embedding_model, top);
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
@@ -655,6 +859,12 @@ fn cmd_detect_changes(db: &Path, base: &str, max_depth: usize, brief: bool) -> R
     Ok(())
 }
 
+fn cmd_blast_radius(db: &Path, base: &str, max_depth: usize, top: usize) -> Result<()> {
+    let radius = blast_radius_json(db, base, max_depth, top)?;
+    println!("{}", serde_json::to_string_pretty(&radius)?);
+    Ok(())
+}
+
 fn cmd_review_context(
     db: &Path,
     base: &str,
@@ -742,6 +952,27 @@ fn cmd_suggested_questions(db: &Path, base: &str, top: usize) -> Result<()> {
     Ok(())
 }
 
+fn cmd_token_benchmark(
+    db: &Path,
+    base: &str,
+    token_budget: usize,
+    max_lines_per_file: usize,
+) -> Result<()> {
+    let out = token_benchmark_json(db, base, token_budget, max_lines_per_file)?;
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+fn cmd_surprises(db: &Path, top: usize) -> Result<()> {
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&surprises_json(&graph, top))?
+    );
+    Ok(())
+}
+
 fn cmd_architecture(db: &Path, detail_level: &str) -> Result<()> {
     let store = Store::open(db)?;
     let graph = store.load()?;
@@ -749,6 +980,39 @@ fn cmd_architecture(db: &Path, detail_level: &str) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&architecture_overview_json(&graph, detail))?
+    );
+    Ok(())
+}
+
+fn cmd_export(db: &Path, format: &str, output: &Path) -> Result<()> {
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+    let report = export_graph(&graph, format, output)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn cmd_wiki(db: &Path, output: &Path, top: usize) -> Result<()> {
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+    let report = write_wiki(&graph, output, top)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn cmd_report(db: &Path, output: &Path, top: usize) -> Result<()> {
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+    let fts_count = store.fts_stats()?;
+    let (embedding_count, embedding_model) = store.embedding_stats()?;
+    let markdown = graph_report_markdown(&graph, fts_count, embedding_count, embedding_model, top);
+    fs::write(output, markdown)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "operation": "report",
+            "output": output,
+        }))?
     );
     Ok(())
 }
@@ -761,7 +1025,7 @@ fn cmd_tool(db: &Path, operation: &str, params: &str) -> Result<()> {
 }
 
 fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value> {
-    let store = Store::open(db)?;
+    let mut store = Store::open(db)?;
     let graph = store.load()?;
     let detail = DetailLevel::from_params(&params);
     let response = match operation {
@@ -775,7 +1039,29 @@ fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value> {
         }
         "status" => {
             let (nodes, edges) = store.stats()?;
-            json!({ "operation": operation, "nodes": nodes, "edges": edges })
+            let fts_count = store.fts_stats()?;
+            let (embedding_count, embedding_model) = store.embedding_stats()?;
+            json!({
+                "operation": operation,
+                "nodes": nodes,
+                "edges": edges,
+                "fts5": {
+                    "indexed_nodes": fts_count,
+                },
+                "embeddings": {
+                    "count": embedding_count,
+                    "model": embedding_model,
+                }
+            })
+        }
+        "diagnostics" | "health" => {
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+            let fts_count = store.fts_stats()?;
+            let (embedding_count, embedding_model) = store.embedding_stats()?;
+            compact_for_detail(
+                diagnostics_json(&graph, fts_count, embedding_count, embedding_model, limit),
+                detail,
+            )
         }
         "search" => {
             let query = params.get("query").and_then(Value::as_str).unwrap_or("");
@@ -797,6 +1083,15 @@ fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value> {
                 })
                 .collect();
             compact_for_detail(json!({ "operation": operation, "hits": hits }), detail)
+        }
+        "rebuild_fts" | "rebuild_fts_index" => {
+            let indexed_nodes = store.rebuild_fts_index()?;
+            json!({
+                "operation": operation,
+                "fts5": {
+                    "indexed_nodes": indexed_nodes,
+                }
+            })
         }
         "paths" => {
             let from = required_str(&params, "from")?;
@@ -868,6 +1163,33 @@ fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value> {
             let max_depth = params.get("max_depth").and_then(Value::as_u64).unwrap_or(2) as usize;
             compact_for_detail(detect_changes_json(db, base, max_depth)?, detail)
         }
+        "token_benchmark" | "benchmark_tokens" => {
+            let base = params
+                .get("base")
+                .and_then(Value::as_str)
+                .unwrap_or("HEAD~1");
+            let token_budget = params
+                .get("token_budget")
+                .and_then(Value::as_u64)
+                .unwrap_or(1600) as usize;
+            let max_lines_per_file = params
+                .get("max_lines_per_file")
+                .and_then(Value::as_u64)
+                .unwrap_or(200) as usize;
+            compact_for_detail(
+                token_benchmark_json(db, base, token_budget, max_lines_per_file)?,
+                detail,
+            )
+        }
+        "blast_radius" | "impact_radius" => {
+            let base = params
+                .get("base")
+                .and_then(Value::as_str)
+                .unwrap_or("HEAD~1");
+            let max_depth = params.get("max_depth").and_then(Value::as_u64).unwrap_or(2) as usize;
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+            compact_for_detail(blast_radius_json(db, base, max_depth, limit)?, detail)
+        }
         "review_context" => {
             let base = params
                 .get("base")
@@ -931,6 +1253,10 @@ fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value> {
             let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
             compact_for_detail(gaps_json(&graph, limit), detail)
         }
+        "surprises" | "surprise_scoring" => {
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+            compact_for_detail(surprises_json(&graph, limit), detail)
+        }
         "suggested_questions" => {
             let base = params
                 .get("base")
@@ -940,7 +1266,36 @@ fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value> {
             let analysis = detect_changes_json(db, base, 2)?;
             compact_for_detail(suggested_questions_json(&analysis, limit), detail)
         }
+        "communities" => {
+            let algorithm = params
+                .get("algorithm")
+                .and_then(Value::as_str)
+                .unwrap_or("leiden");
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+            let options = community_options_from_params(&params);
+            compact_for_detail(communities_json(&graph, algorithm, options, limit)?, detail)
+        }
         "architecture_overview" | "architecture" => architecture_overview_json(&graph, detail),
+        "export" => {
+            let format = required_str(&params, "format")?;
+            let output = required_str(&params, "output")?;
+            export_graph(&graph, format, Path::new(output))?
+        }
+        "wiki" => {
+            let output = required_str(&params, "output")?;
+            let top = params.get("top").and_then(Value::as_u64).unwrap_or(25) as usize;
+            write_wiki(&graph, Path::new(output), top)?
+        }
+        "report" | "graph_report" => {
+            let output = required_str(&params, "output")?;
+            let top = params.get("top").and_then(Value::as_u64).unwrap_or(10) as usize;
+            let fts_count = store.fts_stats()?;
+            let (embedding_count, embedding_model) = store.embedding_stats()?;
+            let markdown =
+                graph_report_markdown(&graph, fts_count, embedding_count, embedding_model, top);
+            fs::write(output, markdown)?;
+            json!({ "operation": operation, "output": output })
+        }
         "god_nodes" => {
             let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
             let ranks = if let Some(seed) = params.get("seed").and_then(Value::as_str) {
@@ -953,17 +1308,19 @@ fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value> {
             sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let hits: Vec<_> = sorted
                 .into_iter()
-                .take(limit)
                 .filter_map(|(id, score)| {
-                    graph.node(id).map(|n| {
-                        json!({
-                            "id": id.0,
-                            "score": score,
-                            "qualified_name": n.qualified_name,
-                            "kind": n.kind,
-                        })
-                    })
+                    let n = graph.node(id)?;
+                    if !is_rankable_node(n) {
+                        return None;
+                    }
+                    Some(json!({
+                        "id": id.0,
+                        "score": score,
+                        "qualified_name": n.qualified_name,
+                        "kind": n.kind,
+                    }))
                 })
+                .take(limit)
                 .collect();
             compact_for_detail(json!({ "operation": operation, "hits": hits }), detail)
         }
@@ -1028,6 +1385,54 @@ fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value> {
                 detail,
             )
         }
+        "test_coverage" => {
+            if let Some(target) = params.get("target").and_then(Value::as_str) {
+                let id = resolve(&graph, target)?;
+                compact_for_detail(
+                    json!({
+                        "operation": operation,
+                        "target": target,
+                        "coverage": test_coverage_json(&graph, &[id]),
+                    }),
+                    detail,
+                )
+            } else {
+                let base = params
+                    .get("base")
+                    .and_then(Value::as_str)
+                    .unwrap_or("HEAD~1");
+                let analysis = detect_changes_json(db, base, 2)?;
+                compact_for_detail(
+                    json!({
+                        "operation": operation,
+                        "base": base,
+                        "coverage": analysis["test_coverage"].clone(),
+                    }),
+                    detail,
+                )
+            }
+        }
+        "graph_diff" => {
+            let base = params
+                .get("base")
+                .and_then(Value::as_str)
+                .unwrap_or("HEAD~1");
+            let head = params.get("head").and_then(Value::as_str).unwrap_or("HEAD");
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+            compact_for_detail(graph_diff_json(&store, &graph, base, head, limit)?, detail)
+        }
+        "embed_graph" => {
+            let model = params
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(DEFAULT_EMBEDDING_MODEL);
+            let count = store.rebuild_embeddings(model)?;
+            json!({
+                "operation": operation,
+                "count": count,
+                "model": model,
+            })
+        }
         other => bail!("unknown tool operation {}", other),
     };
     Ok(apply_response_guardrails(response, &graph, params, detail))
@@ -1061,7 +1466,7 @@ fn cmd_mcp_server(db: &Path) -> Result<()> {
     let mut reader = BufReader::new(stdin.lock());
     let mut stdout = io::stdout();
     while let Some(message) = read_mcp_message(&mut reader)? {
-        let request: Value = serde_json::from_str(&message)?;
+        let request: Value = serde_json::from_str(&message.body)?;
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
         let id = request.get("id").cloned();
 
@@ -1116,7 +1521,7 @@ fn cmd_mcp_server(db: &Path) -> Result<()> {
             }
             _ => mcp_error(id, -32601, "method not found"),
         };
-        write_mcp_message(&mut stdout, &response)?;
+        write_mcp_message(&mut stdout, &response, message.framing)?;
     }
     Ok(())
 }
@@ -1130,7 +1535,7 @@ fn ariadne_mcp_tool_schema() -> Value {
             "properties": {
                 "operation": {
                     "type": "string",
-                    "description": "Operation name, e.g. minimal_context, search, detect_changes, review_context, impact, paths, traverse, architecture_overview, cycles, core, bridge_nodes, gaps, flows, affected_flows."
+                    "description": "Operation name, e.g. minimal_context, search, rebuild_fts, diagnostics, report, detect_changes, token_benchmark, blast_radius, review_context, impact, paths, traverse, communities, architecture_overview, surprises, export, wiki, cycles, core, bridge_nodes, gaps, flows, affected_flows."
                 },
                 "params": {
                     "type": "object",
@@ -1142,7 +1547,19 @@ fn ariadne_mcp_tool_schema() -> Value {
     })
 }
 
-fn read_mcp_message<R: BufRead>(reader: &mut R) -> Result<Option<String>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpFraming {
+    ContentLength,
+    JsonLine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpMessage {
+    body: String,
+    framing: McpFraming,
+}
+
+fn read_mcp_message<R: BufRead>(reader: &mut R) -> Result<Option<McpMessage>> {
     let mut content_length = None;
     loop {
         let mut line = String::new();
@@ -1153,7 +1570,16 @@ fn read_mcp_message<R: BufRead>(reader: &mut R) -> Result<Option<String>> {
         if trimmed.is_empty() {
             break;
         }
-        if let Some(value) = trimmed.strip_prefix("Content-Length:") {
+        if trimmed.starts_with('{') {
+            return Ok(Some(McpMessage {
+                body: trimmed.to_string(),
+                framing: McpFraming::JsonLine,
+            }));
+        }
+        if let Some(value) = trimmed
+            .strip_prefix("Content-Length:")
+            .or_else(|| trimmed.strip_prefix("content-length:"))
+        {
             content_length = Some(value.trim().parse::<usize>()?);
         }
     }
@@ -1162,12 +1588,20 @@ fn read_mcp_message<R: BufRead>(reader: &mut R) -> Result<Option<String>> {
     };
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
-    Ok(Some(String::from_utf8(buf)?))
+    Ok(Some(McpMessage {
+        body: String::from_utf8(buf)?,
+        framing: McpFraming::ContentLength,
+    }))
 }
 
-fn write_mcp_message<W: Write>(writer: &mut W, value: &Value) -> Result<()> {
+fn write_mcp_message<W: Write>(writer: &mut W, value: &Value, framing: McpFraming) -> Result<()> {
     let body = serde_json::to_string(value)?;
-    write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body)?;
+    match framing {
+        McpFraming::ContentLength => {
+            write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body)?
+        }
+        McpFraming::JsonLine => writeln!(writer, "{}", body)?,
+    }
     writer.flush()?;
     Ok(())
 }
@@ -1199,7 +1633,11 @@ fn cmd_god_nodes(db: &Path, top: usize, seed: Option<&str>) -> Result<()> {
     } else {
         println!("top {} god-nodes by weighted pagerank:", top);
     }
-    for (id, rank) in sorted.iter().take(top) {
+    for (id, rank) in sorted
+        .iter()
+        .filter(|(id, _)| graph.node(**id).map(is_rankable_node).unwrap_or(false))
+        .take(top)
+    {
         if let Some(n) = graph.node(**id) {
             println!("  {:.6}  {}  ({:?})", rank, n.qualified_name, n.kind);
         }
@@ -1207,23 +1645,39 @@ fn cmd_god_nodes(db: &Path, top: usize, seed: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_communities(db: &Path, top: usize, algorithm: &str) -> Result<()> {
+fn community_options(
+    resolution: f32,
+    well_connectedness: f32,
+    max_passes: usize,
+    max_levels: usize,
+    parallel: bool,
+    objective: CommunityObjective,
+) -> CommunityOptions {
+    CommunityOptions {
+        resolution,
+        well_connectedness,
+        max_passes,
+        max_levels,
+        parallel,
+        objective,
+        ..Default::default()
+    }
+}
+
+fn cmd_communities(
+    db: &Path,
+    top: usize,
+    algorithm: &str,
+    options: CommunityOptions,
+) -> Result<()> {
     let store = Store::open(db)?;
     let graph = store.load()?;
-    let comm = match algorithm {
-        "louvain" => louvain(&graph),
-        "leiden" => leiden(&graph),
-        other => bail!(
-            "unknown community algorithm {}; use louvain or leiden",
-            other
-        ),
-    };
-    let mut by_comm: std::collections::BTreeMap<usize, Vec<String>> =
+    let comm = detect_communities(&graph, algorithm, options)?;
+    let quality = community_quality(&graph, &comm, options);
+    let mut by_comm: std::collections::BTreeMap<usize, Vec<NodeId>> =
         std::collections::BTreeMap::new();
     for (id, &c) in &comm {
-        if let Some(n) = graph.node(*id) {
-            by_comm.entry(c).or_default().push(n.qualified_name.clone());
-        }
+        by_comm.entry(c).or_default().push(*id);
     }
     let mut entries: Vec<_> = by_comm.into_iter().collect();
     entries.sort_by_key(|(_, members)| std::cmp::Reverse(members.len()));
@@ -1233,16 +1687,50 @@ fn cmd_communities(db: &Path, top: usize, algorithm: &str) -> Result<()> {
         algorithm,
         top
     );
+    println!(
+        "quality ({}): {:.4}, disconnected {}, mean conductance {:.4}, max conductance {:.4}",
+        match quality.objective {
+            CommunityObjective::Cpm => "cpm",
+            CommunityObjective::Modularity => "modularity",
+        },
+        quality.score,
+        quality.disconnected_communities,
+        quality.mean_conductance,
+        quality.max_conductance
+    );
     for (c, members) in entries.into_iter().take(top) {
-        println!("  community {} ({} members):", c, members.len());
-        for m in members.iter().take(5) {
-            println!("    {}", m);
+        let display_members = ranked_display_members(&graph, &members);
+        println!(
+            "  {} (community {}, {} members):",
+            community_title(&graph, &members),
+            c,
+            members.len()
+        );
+        for id in display_members.iter().take(5) {
+            if let Some(n) = graph.node(*id) {
+                println!("    {}", n.qualified_name);
+            }
         }
         if members.len() > 5 {
             println!("    ... and {} more", members.len() - 5);
         }
     }
     Ok(())
+}
+
+fn detect_communities(
+    graph: &Graph,
+    algorithm: &str,
+    options: CommunityOptions,
+) -> Result<HashMap<NodeId, usize>> {
+    match algorithm {
+        "louvain" => Ok(louvain_with_options(graph, options)),
+        "leiden" => Ok(leiden_with_options(graph, options)),
+        other => bail!(
+            "unknown community algorithm {}; use louvain or leiden",
+            other
+        ),
+    }
 }
 
 fn cmd_flows(db: &Path, top: usize) -> Result<()> {
@@ -1309,6 +1797,57 @@ fn cmd_affected_flows(db: &Path, base: &str, top: usize) -> Result<()> {
     Ok(())
 }
 
+fn cmd_test_coverage(db: &Path, target: Option<&str>, base: &str) -> Result<()> {
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+    let payload = if let Some(target) = target {
+        let id = resolve(&graph, target)?;
+        json!({
+            "operation": "test_coverage",
+            "target": target,
+            "coverage": test_coverage_json(&graph, &[id]),
+        })
+    } else {
+        let analysis = detect_changes_json(db, base, 2)?;
+        json!({
+            "operation": "test_coverage",
+            "base": base,
+            "coverage": analysis["test_coverage"].clone(),
+        })
+    };
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+fn cmd_graph_diff(db: &Path, base: &str, head: &str, top: usize) -> Result<()> {
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&graph_diff_json(&store, &graph, base, head, top)?)?
+    );
+    Ok(())
+}
+
+fn cmd_embed(db: &Path, model: &str) -> Result<()> {
+    let mut store = Store::open(db)?;
+    let count = store.rebuild_embeddings(model)?;
+    println!(
+        "built {} embedding(s) with model {} into {}",
+        count,
+        model,
+        db.display()
+    );
+    Ok(())
+}
+
+fn cmd_rebuild_fts(db: &Path) -> Result<()> {
+    let mut store = Store::open(db)?;
+    let count = store.rebuild_fts_index()?;
+    println!("rebuilt FTS5 index: {} node(s) indexed", count);
+    Ok(())
+}
+
 fn cmd_search(db: &Path, query: &str) -> Result<()> {
     let store = Store::open(db)?;
     let graph = store.load()?;
@@ -1333,6 +1872,212 @@ fn cmd_tui(db: &Path) -> Result<()> {
     let store = Store::open(db)?;
     let graph = store.load()?;
     ariadne_graph::tui::run(&store, &graph)
+}
+
+fn stamp_missing_validity(graph: &mut Graph, commit: &str) {
+    let node_ids: Vec<NodeId> = graph.nodes().map(|(id, _)| id).collect();
+    for id in node_ids {
+        if let Some(node) = graph.node_mut(id) {
+            if node.valid_from.is_none() {
+                node.valid_from = Some(commit.to_string());
+            }
+        }
+    }
+    let edge_ids: Vec<_> = graph.edges().map(|(id, _, _, _)| id).collect();
+    for id in edge_ids {
+        if let Some(edge) = graph.edge_mut(id) {
+            if edge.valid_from.is_none() {
+                edge.valid_from = Some(commit.to_string());
+            }
+        }
+    }
+}
+
+fn apply_temporal_incremental_validity(
+    graph: &mut Graph,
+    changed_sources: &[String],
+    previous_nodes: &[StoredNodeRow],
+    previous_edges: &[StoredEdgeRow],
+    commit: &str,
+) {
+    let previous_node_valid_from: HashMap<String, Option<String>> = previous_nodes
+        .iter()
+        .map(|row| {
+            (
+                row.node.qualified_name.clone(),
+                row.node
+                    .valid_from
+                    .clone()
+                    .or_else(|| Some(commit.to_string())),
+            )
+        })
+        .collect();
+    let previous_edge_valid_from: HashMap<String, Option<String>> = previous_edges
+        .iter()
+        .map(|row| {
+            (
+                edge_identity(&row.src_qname, &row.dst_qname, row.edge.kind),
+                row.edge
+                    .valid_from
+                    .clone()
+                    .or_else(|| Some(commit.to_string())),
+            )
+        })
+        .collect();
+
+    let changed_source_set: HashSet<&str> = changed_sources.iter().map(String::as_str).collect();
+    let node_ids: Vec<NodeId> = graph
+        .nodes()
+        .filter(|(_, node)| {
+            node.source_uri
+                .as_deref()
+                .map(|source| changed_source_set.contains(source))
+                .unwrap_or(false)
+        })
+        .map(|(id, _)| id)
+        .collect();
+    for id in node_ids {
+        if let Some(node) = graph.node_mut(id) {
+            node.valid_from = previous_node_valid_from
+                .get(&node.qualified_name)
+                .cloned()
+                .flatten()
+                .or_else(|| Some(commit.to_string()));
+            node.valid_to = None;
+        }
+    }
+
+    let edge_updates: Vec<_> = graph
+        .edges()
+        .filter_map(|(id, src, dst, edge)| {
+            let src_source = graph.node(src).and_then(|node| node.source_uri.as_deref());
+            let dst_source = graph.node(dst).and_then(|node| node.source_uri.as_deref());
+            let touches_changed_source = src_source
+                .map(|source| changed_source_set.contains(source))
+                .unwrap_or(false)
+                || dst_source
+                    .map(|source| changed_source_set.contains(source))
+                    .unwrap_or(false);
+            if !touches_changed_source {
+                return None;
+            }
+            let src_qname = graph.node(src)?.qualified_name.clone();
+            let dst_qname = graph.node(dst)?.qualified_name.clone();
+            Some((id, edge_identity(&src_qname, &dst_qname, edge.kind)))
+        })
+        .collect();
+    for (id, identity) in edge_updates {
+        if let Some(edge) = graph.edge_mut(id) {
+            edge.valid_from = previous_edge_valid_from
+                .get(&identity)
+                .cloned()
+                .flatten()
+                .or_else(|| Some(commit.to_string()));
+            edge.valid_to = None;
+        }
+    }
+}
+
+fn current_node_keys_for_sources(graph: &Graph, sources: &[String]) -> HashSet<String> {
+    let source_set: HashSet<&str> = sources.iter().map(String::as_str).collect();
+    graph
+        .nodes()
+        .filter(|(_, node)| {
+            node.source_uri
+                .as_deref()
+                .map(|source| source_set.contains(source))
+                .unwrap_or(false)
+        })
+        .map(|(_, node)| node.qualified_name.clone())
+        .collect()
+}
+
+fn current_edge_keys_for_sources(graph: &Graph, sources: &[String]) -> HashSet<String> {
+    let source_set: HashSet<&str> = sources.iter().map(String::as_str).collect();
+    graph
+        .edges()
+        .filter_map(|(_, src, dst, edge)| {
+            let src_source = graph.node(src).and_then(|node| node.source_uri.as_deref());
+            let dst_source = graph.node(dst).and_then(|node| node.source_uri.as_deref());
+            let touches_changed_source = src_source
+                .map(|source| source_set.contains(source))
+                .unwrap_or(false)
+                || dst_source
+                    .map(|source| source_set.contains(source))
+                    .unwrap_or(false);
+            if !touches_changed_source {
+                return None;
+            }
+            Some(edge_identity(
+                &graph.node(src)?.qualified_name,
+                &graph.node(dst)?.qualified_name,
+                edge.kind,
+            ))
+        })
+        .collect()
+}
+
+fn removed_nodes_for_archive(
+    previous_nodes: &[StoredNodeRow],
+    current_node_keys: &HashSet<String>,
+) -> Vec<StoredNodeRow> {
+    previous_nodes
+        .iter()
+        .filter(|row| !current_node_keys.contains(&row.node.qualified_name))
+        .cloned()
+        .collect()
+}
+
+fn removed_edges_for_archive(
+    previous_edges: &[StoredEdgeRow],
+    current_edge_keys: &HashSet<String>,
+) -> Vec<StoredEdgeRow> {
+    previous_edges
+        .iter()
+        .filter(|row| {
+            !current_edge_keys.contains(&edge_identity(
+                &row.src_qname,
+                &row.dst_qname,
+                row.edge.kind,
+            ))
+        })
+        .cloned()
+        .collect()
+}
+
+fn previous_nodes_for_deleted_sources(
+    previous_nodes: &[StoredNodeRow],
+    deleted_sources: &[String],
+) -> Vec<StoredNodeRow> {
+    let deleted_set: HashSet<&str> = deleted_sources.iter().map(String::as_str).collect();
+    previous_nodes
+        .iter()
+        .filter(|row| {
+            row.node
+                .source_uri
+                .as_deref()
+                .map(|source| deleted_set.contains(source))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
+}
+
+fn previous_edges_for_deleted_sources(
+    previous_edges: &[StoredEdgeRow],
+    deleted_sources: &[String],
+) -> Vec<StoredEdgeRow> {
+    let deleted_set: HashSet<&str> = deleted_sources.iter().map(String::as_str).collect();
+    previous_edges
+        .iter()
+        .filter(|row| {
+            row.source_uri
+                .as_deref()
+                .map(|source| deleted_set.contains(source))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
 }
 
 fn collect_file_hashes(root: &Path) -> Result<Vec<(String, String)>> {
@@ -1592,6 +2337,7 @@ const PAGEABLE_RESPONSE_KEYS: &[&str] = &[
     "articulation_points",
     "warnings",
     "questions",
+    "omitted",
 ];
 
 fn graph_summary_json(graph: &Graph) -> Value {
@@ -1623,8 +2369,132 @@ fn graph_summary_json(graph: &Graph) -> Value {
     })
 }
 
+fn community_objective_from_params(params: &Value) -> Option<CommunityObjective> {
+    params
+        .get("objective")
+        .and_then(Value::as_str)
+        .and_then(|value| parse_community_objective(value).ok())
+}
+
+fn parse_community_objective(value: &str) -> Result<CommunityObjective> {
+    match value.to_lowercase().as_str() {
+        "modularity" => Ok(CommunityObjective::Modularity),
+        "cpm" => Ok(CommunityObjective::Cpm),
+        other => bail!(
+            "unknown community objective {}; use modularity or cpm",
+            other
+        ),
+    }
+}
+
+fn community_options_from_params(params: &Value) -> CommunityOptions {
+    community_options(
+        params
+            .get("resolution")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0) as f32,
+        params
+            .get("well_connectedness")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0) as f32,
+        params
+            .get("max_passes")
+            .and_then(Value::as_u64)
+            .unwrap_or(50) as usize,
+        params
+            .get("max_levels")
+            .and_then(Value::as_u64)
+            .unwrap_or(10) as usize,
+        !params
+            .get("no_parallel")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        community_objective_from_params(params).unwrap_or(CommunityObjective::Modularity),
+    )
+}
+
+fn community_quality_json(quality: &ariadne_graph::query::CommunityQuality) -> Value {
+    json!({
+        "community_count": quality.community_count,
+        "singleton_count": quality.singleton_count,
+        "min_size": quality.min_size,
+        "max_size": quality.max_size,
+        "mean_size": quality.mean_size,
+        "objective": match quality.objective {
+            CommunityObjective::Cpm => "cpm",
+            CommunityObjective::Modularity => "modularity",
+        },
+        "score": quality.score,
+        "modularity": quality.score,
+        "disconnected_communities": quality.disconnected_communities,
+        "mean_conductance": quality.mean_conductance,
+        "max_conductance": quality.max_conductance,
+    })
+}
+
+fn communities_json(
+    graph: &Graph,
+    algorithm: &str,
+    options: CommunityOptions,
+    limit: usize,
+) -> Result<Value> {
+    let communities = detect_communities(graph, algorithm, options)?;
+    let quality = community_quality(graph, &communities, options);
+    let mut by_comm: HashMap<usize, Vec<NodeId>> = HashMap::new();
+    for (&node, &community) in &communities {
+        by_comm.entry(community).or_default().push(node);
+    }
+
+    let mut rows: Vec<_> = by_comm
+        .into_iter()
+        .map(|(community, members)| {
+            let display = ranked_display_members(graph, &members);
+            let key_nodes: Vec<_> = display
+                .into_iter()
+                .take(8)
+                .filter_map(|id| {
+                    let node = graph.node(id)?;
+                    Some(json!({
+                        "id": id.0,
+                        "qualified_name": node.qualified_name,
+                        "kind": node.kind,
+                        "source_uri": node.source_uri,
+                    }))
+                })
+                .collect();
+            json!({
+                "community": community,
+                "title": community_title(graph, &members),
+                "size": members.len(),
+                "key_nodes": key_nodes,
+            })
+        })
+        .collect();
+    rows.sort_by_key(|row| std::cmp::Reverse(row["size"].as_u64().unwrap_or_default()));
+    rows.truncate(limit);
+
+    Ok(json!({
+        "operation": "communities",
+        "algorithm": algorithm,
+        "options": {
+            "resolution": options.resolution,
+            "well_connectedness": options.well_connectedness,
+            "max_passes": options.max_passes,
+            "max_levels": options.max_levels,
+            "parallel": options.parallel,
+            "objective": match options.objective {
+                CommunityObjective::Cpm => "cpm",
+                CommunityObjective::Modularity => "modularity",
+            },
+        },
+        "quality": community_quality_json(&quality),
+        "communities": rows,
+    }))
+}
+
 fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
     let communities = leiden(graph);
+    let quality = community_quality(graph, &communities, CommunityOptions::default());
     let mut by_comm: HashMap<usize, Vec<NodeId>> = HashMap::new();
     for (&node, &community) in &communities {
         by_comm.entry(community).or_default().push(node);
@@ -1708,6 +2578,7 @@ fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
         "node_count": graph.node_count(),
         "edge_count": graph.edge_count(),
         "community_count": by_comm.len(),
+        "community_quality": community_quality_json(&quality),
         "communities": summaries,
         "cross_community_coupling": coupling_rows,
         "bridge_nodes": bridges["hits"].clone(),
@@ -1724,23 +2595,12 @@ fn detect_changes_json(db: &Path, base: &str, max_depth: usize) -> Result<Value>
     let graph = store.load()?;
     let (changed_files, changed_nodes, changed_ranges, mapping_precision, temporal) =
         if let Some(head) = git_commit_hash("HEAD")? {
-            if graph_has_temporal_data(&graph) {
+            if store.has_temporal_history()? {
                 if let Some(base_hash) = git_commit_hash(base)? {
                     let diff = git_changed_diff(base).unwrap_or_default();
-                    let mut cache = HashMap::new();
-                    let temporal =
-                        temporal_diff(&graph, &base_hash, &head, &mut |ancestor, descendant| {
-                            *cache
-                                .entry((ancestor.to_string(), descendant.to_string()))
-                                .or_insert_with(|| git_is_ancestor(ancestor, descendant))
-                        });
-                    let changed_nodes = temporal.changed_nodes();
-                    let changed_files = changed_nodes
-                        .iter()
-                        .filter_map(|id| graph.node(*id).and_then(|n| n.source_uri.clone()))
-                        .collect::<HashSet<_>>();
-                    let mut changed_files: Vec<String> = changed_files.into_iter().collect();
-                    changed_files.sort();
+                    let temporal = store_temporal_diff(&store, &base_hash, &head)?;
+                    let changed_nodes = temporal_active_node_ids(&graph, &temporal);
+                    let changed_files = temporal.changed_files.clone();
                     let mapping_precision = if diff.iter().any(|f| !f.hunks.is_empty()) {
                         "temporal+line_ranges"
                     } else {
@@ -1751,7 +2611,7 @@ fn detect_changes_json(db: &Path, base: &str, max_depth: usize) -> Result<Value>
                         changed_nodes,
                         changed_ranges_json(&graph, &diff),
                         mapping_precision.to_string(),
-                        Some(temporal),
+                        Some(store_temporal_diff_json(&temporal, 50)),
                     )
                 } else {
                     old_changed_diff(&graph, base)
@@ -1793,6 +2653,7 @@ fn detect_changes_json(db: &Path, base: &str, max_depth: usize) -> Result<Value>
             .partial_cmp(&a["score"].as_f64())
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    let impacted_total = impacted.len();
     impacted.truncate(25);
     let test_coverage = test_coverage_json(&graph, &changed_nodes);
     let missing_count = test_coverage["missing_count"].as_u64().unwrap_or(0) as usize;
@@ -1814,9 +2675,11 @@ fn detect_changes_json(db: &Path, base: &str, max_depth: usize) -> Result<Value>
         "base": base,
         "changed_files": changed_files,
         "changed_ranges": changed_ranges,
+        "changed_symbol_total": changed_nodes.len(),
         "changed_symbols": nodes_json(&graph, &changed_nodes, 50),
         "changed_nodes": nodes_json(&graph, &changed_nodes, 50),
-        "temporal": temporal.as_ref().map(|diff| temporal_diff_json(&graph, diff)),
+        "temporal": temporal,
+        "impacted_total": impacted_total,
         "impacted": impacted,
         "test_coverage": test_coverage,
         "affected_flows": affected_flows,
@@ -1825,6 +2688,465 @@ fn detect_changes_json(db: &Path, base: &str, max_depth: usize) -> Result<Value>
         "mapping_precision": mapping_precision,
         "suggested_next_tools": ["review_context", "impact", "traverse", "suggested_questions"]
     }))
+}
+
+fn blast_radius_json(db: &Path, base: &str, max_depth: usize, limit: usize) -> Result<Value> {
+    let limit = limit.max(1);
+    let analysis = detect_changes_json(db, base, max_depth)?;
+    let changed_files = analysis["changed_files"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let changed_nodes = analysis["changed_nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let impacted = analysis["impacted"].as_array().cloned().unwrap_or_default();
+    let affected_file_count = blast_affected_file_total(&changed_files, &changed_nodes, &impacted);
+    let affected_files = blast_affected_files(&changed_files, &changed_nodes, &impacted, limit);
+    let changed_symbol_count = analysis["changed_symbol_total"]
+        .as_u64()
+        .unwrap_or(changed_nodes.len() as u64);
+    let impacted_count = analysis["impacted_total"]
+        .as_u64()
+        .unwrap_or(impacted.len() as u64) as usize;
+    let test_gap_count = analysis["test_coverage"]["missing_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let affected_flow_count = analysis["affected_flows"]["total"].as_u64().unwrap_or(0);
+    let wide = impacted_count > 20 || affected_file_count > 3;
+    let guidance = blast_radius_guidance(impacted_count, affected_file_count, test_gap_count);
+
+    Ok(json!({
+        "operation": "blast_radius",
+        "base": base,
+        "max_depth": max_depth,
+        "summary": {
+            "changed_file_count": changed_files.len(),
+            "changed_symbol_count": changed_symbol_count,
+            "impacted_symbol_count": impacted_count,
+            "affected_file_count": affected_file_count,
+            "affected_flow_count": affected_flow_count,
+            "test_gap_count": test_gap_count,
+            "wide": wide,
+            "risk": analysis["risk"].clone(),
+            "risk_score": analysis["risk_score"].clone(),
+            "mapping_precision": analysis["mapping_precision"].clone(),
+        },
+        "changed": blast_symbol_groups(&changed_nodes, limit),
+        "impacted": blast_symbol_groups(&impacted, limit),
+        "affected_files": affected_files,
+        "changed_hunks": blast_changed_hunks(&analysis["changed_ranges"], limit),
+        "affected_flows": analysis["affected_flows"].clone(),
+        "test_coverage": blast_test_coverage_summary(&analysis["test_coverage"], limit),
+        "guidance": guidance,
+        "suggested_next_tools": ["review_context", "impact", "affected_flows", "test_coverage"]
+    }))
+}
+
+fn blast_symbol_groups(nodes: &[Value], limit: usize) -> Value {
+    let mut functions = Vec::new();
+    let mut classes = Vec::new();
+    let mut files = Vec::new();
+    let mut other = Vec::new();
+
+    for node in nodes {
+        let target = match node_kind_str(node) {
+            "function" | "method" => &mut functions,
+            "class" | "type" | "trait" | "impl" | "enum" | "struct" => &mut classes,
+            "file" | "document" => &mut files,
+            _ => &mut other,
+        };
+        if target.len() < limit {
+            target.push(node.clone());
+        }
+    }
+
+    json!({
+        "functions": functions,
+        "classes": classes,
+        "files": files,
+        "other": other,
+    })
+}
+
+fn blast_affected_files(
+    changed_files: &[Value],
+    changed_nodes: &[Value],
+    impacted: &[Value],
+    limit: usize,
+) -> Value {
+    let mut files = blast_affected_file_map(changed_files, changed_nodes, impacted);
+    let mut rows: Vec<_> = files
+        .drain()
+        .map(|(path, (changed_symbols, impacted_symbols, max_score))| {
+            json!({
+                "path": path,
+                "changed_symbols": changed_symbols,
+                "impacted_symbols": impacted_symbols,
+                "max_score": max_score,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b["changed_symbols"]
+            .as_u64()
+            .cmp(&a["changed_symbols"].as_u64())
+            .then_with(|| {
+                b["impacted_symbols"]
+                    .as_u64()
+                    .cmp(&a["impacted_symbols"].as_u64())
+            })
+            .then_with(|| {
+                b["max_score"]
+                    .as_f64()
+                    .partial_cmp(&a["max_score"].as_f64())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    rows.truncate(limit);
+    json!(rows)
+}
+
+fn blast_affected_file_total(
+    changed_files: &[Value],
+    changed_nodes: &[Value],
+    impacted: &[Value],
+) -> usize {
+    blast_affected_file_map(changed_files, changed_nodes, impacted).len()
+}
+
+fn blast_affected_file_map(
+    changed_files: &[Value],
+    changed_nodes: &[Value],
+    impacted: &[Value],
+) -> HashMap<String, (usize, usize, f64)> {
+    let mut files: HashMap<String, (usize, usize, f64)> = HashMap::new();
+    for file in changed_files {
+        if let Some(path) = file.as_str() {
+            files.entry(path.to_string()).or_insert((0, 0, 0.0));
+        }
+    }
+    for node in changed_nodes {
+        if let Some(path) = node["source_uri"].as_str() {
+            files.entry(path.to_string()).or_insert((0, 0, 0.0)).0 += 1;
+        }
+    }
+    for hit in impacted {
+        if let Some(path) = hit["source_uri"].as_str() {
+            let score = hit["score"].as_f64().unwrap_or_default();
+            let entry = files.entry(path.to_string()).or_insert((0, 0, 0.0));
+            entry.1 += 1;
+            entry.2 = entry.2.max(score);
+        }
+    }
+    files
+}
+
+fn blast_radius_guidance(
+    impacted_count: usize,
+    affected_file_count: usize,
+    test_gap_count: u64,
+) -> Vec<String> {
+    let mut guidance = Vec::new();
+    if test_gap_count > 0 {
+        guidance.push(format!(
+            "{} changed symbol(s) lack direct or nearby test coverage.",
+            test_gap_count
+        ));
+    }
+    if impacted_count > 20 {
+        guidance.push(format!(
+            "Wide blast radius: {} impacted symbol(s). Review callers and dependents carefully.",
+            impacted_count
+        ));
+    }
+    if affected_file_count > 3 {
+        guidance.push(format!(
+            "Cross-file impact: {} affected file(s). Consider whether the change should be split or staged.",
+            affected_file_count
+        ));
+    }
+    if guidance.is_empty() {
+        guidance.push("Changes appear contained with minimal blast radius.".to_string());
+    }
+    guidance
+}
+
+fn blast_changed_hunks(changed_ranges: &Value, limit: usize) -> Value {
+    let mut files = Vec::new();
+    for file in changed_ranges.as_array().into_iter().flatten() {
+        let mut hunks = Vec::new();
+        for hunk in file["hunks"].as_array().into_iter().flatten() {
+            if hunk["symbols"]
+                .as_array()
+                .map(|s| s.is_empty())
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            hunks.push(hunk.clone());
+            if hunks.len() >= limit {
+                break;
+            }
+        }
+        if !hunks.is_empty() {
+            files.push(json!({
+                "path": file["path"].clone(),
+                "hunks": hunks,
+            }));
+        }
+        if files.len() >= limit {
+            break;
+        }
+    }
+    json!(files)
+}
+
+fn blast_test_coverage_summary(test_coverage: &Value, limit: usize) -> Value {
+    let missing: Vec<Value> = test_coverage["missing"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .take(limit)
+        .collect();
+    json!({
+        "covered_count": test_coverage["covered_count"].clone(),
+        "missing_count": test_coverage["missing_count"].clone(),
+        "total_symbols": test_coverage["total_symbols"].clone(),
+        "coverage_ratio": test_coverage["coverage_ratio"].clone(),
+        "missing": missing,
+    })
+}
+
+fn node_kind_str(node: &Value) -> &str {
+    node.get("kind").and_then(Value::as_str).unwrap_or("")
+}
+
+fn is_rankable_node(node: &ariadne_graph::Node) -> bool {
+    !node.qualified_name.starts_with("call::")
+        && !matches!(
+            node.kind,
+            NodeKind::Module
+                | NodeKind::File
+                | NodeKind::Document
+                | NodeKind::Section
+                | NodeKind::Concept
+                | NodeKind::Diagram
+                | NodeKind::Image
+                | NodeKind::Flow
+                | NodeKind::Hyperedge
+                | NodeKind::Author
+                | NodeKind::Commit
+        )
+}
+
+fn is_test_like_node(node: &ariadne_graph::Node) -> bool {
+    node.properties
+        .get("is_test")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || node.qualified_name.contains("::tests::")
+        || node.name.starts_with("test_")
+        || node
+            .source_uri
+            .as_deref()
+            .map(|source| source.contains("/tests/") || source.contains("\\tests\\"))
+            .unwrap_or(false)
+}
+
+fn is_actionable_unresolved_call(node: &ariadne_graph::Node, incoming: usize) -> bool {
+    if !node.qualified_name.starts_with("call::") || incoming < 2 {
+        return false;
+    }
+    !node.name.starts_with("cmd_")
+        && !is_generic_utility_name(&node.name)
+        && !is_low_signal_call_name(&node.name)
+}
+
+fn is_low_signal_call_name(name: &str) -> bool {
+    !name.contains('_')
+        && name.len() <= 12
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+fn is_generic_utility_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Ok" | "Err"
+            | "as_deref"
+            | "as_ref"
+            | "as_str"
+            | "cloned"
+            | "clone"
+            | "collect"
+            | "contains"
+            | "default"
+            | "display"
+            | "edge_count"
+            | "enumerate"
+            | "exists"
+            | "expect"
+            | "extend"
+            | "filter"
+            | "filter_map"
+            | "find"
+            | "from_secs"
+            | "get"
+            | "into_iter"
+            | "insert"
+            | "is_empty"
+            | "iter"
+            | "len"
+            | "load"
+            | "map"
+            | "new"
+            | "node_count"
+            | "ok"
+            | "open"
+            | "parse"
+            | "push"
+            | "save"
+            | "sleep"
+            | "sort"
+            | "sort_by"
+            | "sort_by_key"
+            | "to_string"
+            | "to_str"
+            | "to_string_pretty"
+            | "unwrap"
+            | "unwrap_or"
+            | "unwrap_or_default"
+            | "unwrap_or_else"
+            | "zip"
+    )
+}
+
+fn token_benchmark_json(
+    db: &Path,
+    base: &str,
+    token_budget: usize,
+    max_lines_per_file: usize,
+) -> Result<Value> {
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+    let analysis = detect_changes_json(db, base, 2)?;
+    let changed_files: Vec<String> = analysis["changed_files"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+        .collect();
+
+    let all_sources = git_tracked_files().unwrap_or_else(|_| graph_source_files(&graph));
+    let full_repo_tokens = source_files_tokens(&all_sources);
+    let changed_file_tokens = source_files_tokens(&changed_files);
+    let detect_changes_tokens = approx_tokens(&analysis.to_string());
+    let review_context = review_context_json(db, base, max_lines_per_file, token_budget)?;
+    let review_context_tokens = review_context["used_tokens"]
+        .as_u64()
+        .unwrap_or_else(|| approx_tokens(&review_context.to_string()) as u64)
+        as usize;
+    let blast_radius = blast_radius_json(db, base, 2, 25)?;
+    let blast_radius_tokens = approx_tokens(&blast_radius.to_string());
+    let suggested = suggested_questions_json(&analysis, 10);
+    let suggested_tokens = approx_tokens(&suggested.to_string());
+
+    let scenarios = vec![
+        token_scenario("naive_full_repo", full_repo_tokens, full_repo_tokens),
+        token_scenario("naive_changed_files", changed_file_tokens, full_repo_tokens),
+        token_scenario(
+            "detect_changes_json",
+            detect_changes_tokens,
+            changed_file_tokens,
+        ),
+        token_scenario("review_context", review_context_tokens, changed_file_tokens),
+        token_scenario("blast_radius", blast_radius_tokens, changed_file_tokens),
+        token_scenario("suggested_questions", suggested_tokens, changed_file_tokens),
+    ];
+
+    Ok(json!({
+        "operation": "token_benchmark",
+        "base": base,
+        "estimator": "approx_bytes_div_4",
+        "summary": {
+            "source_file_count": all_sources.len(),
+            "changed_file_count": changed_files.len(),
+            "full_repo_tokens": full_repo_tokens,
+            "changed_file_tokens": changed_file_tokens,
+            "review_context_budget": token_budget,
+            "best_ratio_vs_changed_files": scenarios.iter()
+                .filter_map(|s| s["ratio_vs_baseline"].as_f64())
+                .filter(|ratio| ratio.is_finite())
+                .fold(0.0, f64::max),
+        },
+        "scenarios": scenarios,
+        "notes": [
+            "Token counts are approximate and intended for relative comparisons.",
+            "Graph-query payloads include structured JSON overhead; review_context used_tokens counts emitted snippets."
+        ],
+    }))
+}
+
+fn graph_source_files(graph: &Graph) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for (_, node) in graph.nodes() {
+        let Some(source) = &node.source_uri else {
+            continue;
+        };
+        if seen.insert(source.clone()) {
+            out.push(source.clone());
+        }
+    }
+    out.sort();
+    out
+}
+
+fn source_files_tokens(files: &[String]) -> usize {
+    let mut total = 0usize;
+    for file in files {
+        if let Ok(content) = fs::read_to_string(file) {
+            total += approx_tokens(&content);
+        }
+    }
+    total
+}
+
+fn git_tracked_files() -> Result<Vec<String>> {
+    let output = Command::new("git").args(["ls-files"]).output()?;
+    if !output.status.success() {
+        bail!("git ls-files failed");
+    }
+    let files = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| Path::new(line).is_file())
+        .map(ToOwned::to_owned)
+        .collect();
+    Ok(files)
+}
+
+fn token_scenario(name: &str, tokens: usize, baseline: usize) -> Value {
+    let ratio = if tokens > 0 && baseline > 0 {
+        baseline as f64 / tokens as f64
+    } else {
+        0.0
+    };
+    json!({
+        "name": name,
+        "tokens": tokens,
+        "baseline_tokens": baseline,
+        "ratio_vs_baseline": ratio,
+        "savings_percent": if baseline > 0 {
+            ((baseline.saturating_sub(tokens)) as f64 / baseline as f64) * 100.0
+        } else {
+            0.0
+        },
+    })
 }
 
 fn append_unique_nodes(nodes: &mut Vec<NodeId>, extra: Vec<NodeId>) {
@@ -1839,13 +3161,7 @@ fn append_unique_nodes(nodes: &mut Vec<NodeId>, extra: Vec<NodeId>) {
 fn old_changed_diff(
     graph: &Graph,
     base: &str,
-) -> (
-    Vec<String>,
-    Vec<NodeId>,
-    Vec<Value>,
-    String,
-    Option<TemporalDiff>,
-) {
+) -> (Vec<String>, Vec<NodeId>, Vec<Value>, String, Option<Value>) {
     let diff = git_changed_diff(base).unwrap_or_default();
     let changed_files: Vec<String> = diff.iter().map(|file| file.path.clone()).collect();
     let line_changed_nodes = nodes_for_changed_ranges(graph, &diff);
@@ -1871,43 +3187,232 @@ fn old_changed_diff(
     )
 }
 
-fn temporal_diff_json(graph: &Graph, diff: &TemporalDiff) -> Value {
+#[derive(Default)]
+struct StoreTemporalDiff {
+    added_nodes: Vec<StoredNodeRow>,
+    removed_nodes: Vec<StoredNodeRow>,
+    added_edges: Vec<StoredEdgeRow>,
+    removed_edges: Vec<StoredEdgeRow>,
+    changed_files: Vec<String>,
+}
+
+fn graph_diff_json(
+    store: &Store,
+    graph: &Graph,
+    base: &str,
+    head: &str,
+    limit: usize,
+) -> Result<Value> {
+    if !store.has_temporal_history()? {
+        return Ok(json!({
+            "operation": "graph_diff",
+            "available": false,
+            "base": base,
+            "head": head,
+            "reason": "graph has no temporal validity data",
+        }));
+    }
+
+    let base_resolved = git_commit_hash(base)?.unwrap_or_else(|| base.to_string());
+    let head_resolved = git_commit_hash(head)?.unwrap_or_else(|| head.to_string());
+    let diff = store_temporal_diff(store, &base_resolved, &head_resolved)?;
+    let changed_nodes = temporal_active_node_ids(graph, &diff);
+
+    Ok(json!({
+        "operation": "graph_diff",
+        "available": true,
+        "base": base,
+        "base_resolved": base_resolved,
+        "head": head,
+        "head_resolved": head_resolved,
+        "summary": {
+            "changed_nodes": changed_nodes.len(),
+            "added_nodes": diff.added_nodes.len(),
+            "removed_nodes": diff.removed_nodes.len(),
+            "added_edges": diff.added_edges.len(),
+            "removed_edges": diff.removed_edges.len(),
+            "changed_files": diff.changed_files.len(),
+        },
+        "changed_files": diff.changed_files,
+        "nodes_by_kind": {
+            "added": node_kind_counts_json(&diff.added_nodes),
+            "removed": node_kind_counts_json(&diff.removed_nodes),
+        },
+        "edges_by_kind": {
+            "added": edge_kind_counts_json(&diff.added_edges),
+            "removed": edge_kind_counts_json(&diff.removed_edges),
+        },
+        "diff": store_temporal_diff_json(&diff, limit),
+    }))
+}
+
+fn store_temporal_diff(store: &Store, base: &str, head: &str) -> Result<StoreTemporalDiff> {
+    let mut diff = StoreTemporalDiff::default();
+    let mut changed_files = HashSet::new();
+    let mut ancestor_cache = HashMap::new();
+    let mut is_ancestor_cached = |ancestor: &str, descendant: &str| {
+        *ancestor_cache
+            .entry((ancestor.to_string(), descendant.to_string()))
+            .or_insert_with(|| git_is_ancestor(ancestor, descendant))
+    };
+
+    for row in store.temporal_nodes()? {
+        let active_at_base = is_active_at(
+            row.node.valid_from.as_deref(),
+            row.node.valid_to.as_deref(),
+            base,
+            &mut is_ancestor_cached,
+        );
+        let active_at_head = is_active_at(
+            row.node.valid_from.as_deref(),
+            row.node.valid_to.as_deref(),
+            head,
+            &mut is_ancestor_cached,
+        );
+        match (active_at_base, active_at_head) {
+            (false, true) => {
+                if let Some(source) = row.node.source_uri.clone() {
+                    changed_files.insert(source);
+                }
+                diff.added_nodes.push(row);
+            }
+            (true, false) => {
+                if let Some(source) = row.node.source_uri.clone() {
+                    changed_files.insert(source);
+                }
+                diff.removed_nodes.push(row);
+            }
+            _ => {}
+        }
+    }
+
+    for row in store.temporal_edges()? {
+        let active_at_base = is_active_at(
+            row.edge.valid_from.as_deref(),
+            row.edge.valid_to.as_deref(),
+            base,
+            &mut is_ancestor_cached,
+        );
+        let active_at_head = is_active_at(
+            row.edge.valid_from.as_deref(),
+            row.edge.valid_to.as_deref(),
+            head,
+            &mut is_ancestor_cached,
+        );
+        match (active_at_base, active_at_head) {
+            (false, true) => {
+                if let Some(source) = row.source_uri.clone() {
+                    changed_files.insert(source);
+                }
+                diff.added_edges.push(row);
+            }
+            (true, false) => {
+                if let Some(source) = row.source_uri.clone() {
+                    changed_files.insert(source);
+                }
+                diff.removed_edges.push(row);
+            }
+            _ => {}
+        }
+    }
+
+    diff.added_nodes
+        .sort_by(|a, b| a.node.qualified_name.cmp(&b.node.qualified_name));
+    diff.removed_nodes
+        .sort_by(|a, b| a.node.qualified_name.cmp(&b.node.qualified_name));
+    diff.added_edges.sort_by(|a, b| {
+        edge_identity(&a.src_qname, &a.dst_qname, a.edge.kind).cmp(&edge_identity(
+            &b.src_qname,
+            &b.dst_qname,
+            b.edge.kind,
+        ))
+    });
+    diff.removed_edges.sort_by(|a, b| {
+        edge_identity(&a.src_qname, &a.dst_qname, a.edge.kind).cmp(&edge_identity(
+            &b.src_qname,
+            &b.dst_qname,
+            b.edge.kind,
+        ))
+    });
+    diff.changed_files = changed_files.into_iter().collect();
+    diff.changed_files.sort();
+    Ok(diff)
+}
+
+fn temporal_active_node_ids(graph: &Graph, diff: &StoreTemporalDiff) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let add_qname = |qname: &str, out: &mut Vec<NodeId>, seen: &mut HashSet<NodeId>| {
+        if let Some(id) = graph.find_by_qname(qname) {
+            if seen.insert(id) {
+                out.push(id);
+            }
+        }
+    };
+    for row in diff.added_nodes.iter().chain(diff.removed_nodes.iter()) {
+        add_qname(&row.node.qualified_name, &mut out, &mut seen);
+    }
+    for row in diff.added_edges.iter().chain(diff.removed_edges.iter()) {
+        add_qname(&row.src_qname, &mut out, &mut seen);
+        add_qname(&row.dst_qname, &mut out, &mut seen);
+    }
+    out
+}
+
+fn store_temporal_diff_json(diff: &StoreTemporalDiff, limit: usize) -> Value {
     json!({
-        "added_nodes": nodes_json(graph, &diff.added_nodes, 50),
-        "removed_nodes": nodes_json(graph, &diff.removed_nodes, 50),
-        "added_edges": changed_edges_json(graph, &diff.added_edges),
-        "removed_edges": changed_edges_json(graph, &diff.removed_edges),
+        "added_nodes": diff.added_nodes.iter().take(limit).map(node_row_json).collect::<Vec<_>>(),
+        "removed_nodes": diff.removed_nodes.iter().take(limit).map(node_row_json).collect::<Vec<_>>(),
+        "added_edges": diff.added_edges.iter().take(limit).map(edge_row_json).collect::<Vec<_>>(),
+        "removed_edges": diff.removed_edges.iter().take(limit).map(edge_row_json).collect::<Vec<_>>(),
     })
 }
 
-fn changed_edges_json(graph: &Graph, edges: &[ariadne_graph::query::ChangedEdge]) -> Vec<Value> {
-    edges
-        .iter()
-        .map(|edge| {
-            let src = graph.node(edge.src);
-            let dst = graph.node(edge.dst);
-            json!({
-                "id": edge.id.0,
-                "kind": edge.edge_kind,
-                "change": edge.change,
-                "src_id": edge.src.0,
-                "dst_id": edge.dst.0,
-                "src": src.map(|node| node.qualified_name.clone()),
-                "dst": dst.map(|node| node.qualified_name.clone()),
-                "source_uri": src.and_then(|node| node.source_uri.clone())
-                    .or_else(|| dst.and_then(|node| node.source_uri.clone())),
-            })
-        })
-        .collect()
+fn node_row_json(row: &StoredNodeRow) -> Value {
+    json!({
+        "qualified_name": row.node.qualified_name,
+        "kind": row.node.kind,
+        "source_uri": row.node.source_uri,
+        "line_start": row.node.line_start,
+        "line_end": row.node.line_end,
+        "valid_from": row.node.valid_from,
+        "valid_to": row.node.valid_to,
+    })
 }
 
-fn graph_has_temporal_data(graph: &Graph) -> bool {
-    graph
-        .nodes()
-        .any(|(_, n)| n.valid_from.is_some() || n.valid_to.is_some())
-        || graph
-            .edges()
-            .any(|(_, _, _, e)| e.valid_from.is_some() || e.valid_to.is_some())
+fn edge_row_json(row: &StoredEdgeRow) -> Value {
+    json!({
+        "src": row.src_qname,
+        "dst": row.dst_qname,
+        "kind": row.edge.kind,
+        "source_uri": row.source_uri,
+        "valid_from": row.edge.valid_from,
+        "valid_to": row.edge.valid_to,
+    })
+}
+
+fn node_kind_counts_json(rows: &[StoredNodeRow]) -> Value {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for row in rows {
+        let key = serde_json::to_value(row.node.kind)
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| format!("{:?}", row.node.kind));
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    json!(counts)
+}
+
+fn edge_kind_counts_json(edges: &[StoredEdgeRow]) -> Value {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for edge in edges {
+        let key = serde_json::to_value(edge.edge.kind)
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| format!("{:?}", edge.edge.kind));
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    json!(counts)
 }
 
 fn git_commit_hash(rev: &str) -> Result<Option<String>> {
@@ -1940,38 +3445,60 @@ fn review_context_json(
     token_budget: usize,
 ) -> Result<Value> {
     let analysis = detect_changes_json(db, base, 2)?;
-    let mut files: Vec<String> = analysis["changed_files"]
+    let changed_files: Vec<String> = analysis["changed_files"]
         .as_array()
         .unwrap_or(&Vec::new())
         .iter()
         .filter_map(|v| v.as_str().map(ToOwned::to_owned))
         .collect();
+    let mut files = Vec::<ReviewContextFile>::new();
+    for file in changed_files {
+        upsert_review_context_file(&mut files, file, true, false);
+    }
     for item in analysis["impacted"].as_array().unwrap_or(&Vec::new()) {
         if let Some(source) = item["source_uri"].as_str() {
-            if !files.iter().any(|f| source_matches(f, source)) {
-                files.push(source.to_string());
-            }
+            upsert_review_context_file(&mut files, source.to_string(), false, true);
         }
     }
+    for file in &mut files {
+        file.ranges = ranges_for_file_from_analysis(&analysis, &file.path);
+        file.priority = review_context_priority(file);
+    }
+    files.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+
     let mut used_tokens = 0usize;
     let mut snippets = Vec::new();
+    let mut omitted = Vec::new();
     for file in files {
         if used_tokens >= token_budget {
-            break;
+            omitted.push(review_context_omission(&file, "token_budget_exhausted"));
+            continue;
         }
-        let ranges = ranges_for_file_from_analysis(&analysis, &file);
-        if let Ok(snippet) = file_snippet_for_ranges(&file, &ranges, max_lines_per_file) {
+        let line_limit = review_context_line_limit(max_lines_per_file, token_budget);
+        if let Ok(snippet) =
+            review_context_snippet_for_file(&file.path, &file.ranges, line_limit, token_budget)
+        {
             let tokens = approx_tokens(&snippet);
-            if used_tokens + tokens > token_budget && !snippets.is_empty() {
+            if used_tokens + tokens > token_budget {
+                omitted.push(review_context_omission(&file, "token_budget"));
                 continue;
             }
             used_tokens += tokens;
             snippets.push(json!({
-                "path": file,
+                "path": file.path,
                 "tokens": tokens,
-                "changed_ranges": ranges,
+                "changed": file.changed,
+                "impacted": file.impacted,
+                "priority": file.priority,
+                "changed_ranges": file.ranges,
                 "snippet": snippet
             }));
+        } else {
+            omitted.push(review_context_omission(&file, "unreadable"));
         }
     }
     Ok(json!({
@@ -1979,9 +3506,139 @@ fn review_context_json(
         "base": base,
         "token_budget": token_budget,
         "used_tokens": used_tokens,
-        "analysis": analysis,
+        "context_strategy": "changed_hunks_and_source_files_first",
+        "analysis": review_context_analysis_summary(&analysis),
         "snippets": snippets,
+        "omitted": omitted,
     }))
+}
+
+fn review_context_analysis_summary(analysis: &Value) -> Value {
+    let changed_files = analysis["changed_files"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    json!({
+        "base": analysis["base"].clone(),
+        "risk": analysis["risk"].clone(),
+        "risk_score": analysis["risk_score"].clone(),
+        "mapping_precision": analysis["mapping_precision"].clone(),
+        "changed_file_count": changed_files.len(),
+        "changed_files_sample": changed_files.into_iter().take(20).collect::<Vec<_>>(),
+        "changed_symbol_total": analysis["changed_symbol_total"].clone(),
+        "impacted_total": analysis["impacted_total"].clone(),
+        "affected_flow_count": analysis["affected_flows"]["total"].clone(),
+        "test_coverage": {
+            "covered_count": analysis["test_coverage"]["covered_count"].clone(),
+            "missing_count": analysis["test_coverage"]["missing_count"].clone(),
+            "total_symbols": analysis["test_coverage"]["total_symbols"].clone(),
+            "coverage_ratio": analysis["test_coverage"]["coverage_ratio"].clone(),
+        },
+        "suggested_next_tools": analysis["suggested_next_tools"].clone(),
+        "full_analysis_tool": "detect_changes",
+    })
+}
+
+#[derive(Clone, Debug)]
+struct ReviewContextFile {
+    path: String,
+    changed: bool,
+    impacted: bool,
+    ranges: Vec<(u32, u32)>,
+    priority: i32,
+}
+
+fn upsert_review_context_file(
+    files: &mut Vec<ReviewContextFile>,
+    path: String,
+    changed: bool,
+    impacted: bool,
+) {
+    if let Some(existing) = files
+        .iter_mut()
+        .find(|file| source_matches(&file.path, &path) || source_matches(&path, &file.path))
+    {
+        existing.changed |= changed;
+        existing.impacted |= impacted;
+        if existing.path.len() < path.len() {
+            existing.path = path;
+        }
+        return;
+    }
+    files.push(ReviewContextFile {
+        path,
+        changed,
+        impacted,
+        ranges: Vec::new(),
+        priority: 0,
+    });
+}
+
+fn review_context_priority(file: &ReviewContextFile) -> i32 {
+    let mut score = 0;
+    if file.changed {
+        score += 40;
+    }
+    if file.impacted {
+        score += 25;
+    }
+    if !file.ranges.is_empty() {
+        score += 45;
+    }
+    if is_source_like_path(&file.path) {
+        score += 35;
+    }
+    if is_test_like_path(&file.path) {
+        score += 8;
+    }
+    if is_doc_like_path(&file.path) {
+        score -= 10;
+    }
+    if is_low_signal_review_path(&file.path) {
+        score -= 80;
+    }
+    score
+}
+
+fn review_context_omission(file: &ReviewContextFile, reason: &str) -> Value {
+    json!({
+        "path": file.path,
+        "reason": reason,
+        "changed": file.changed,
+        "impacted": file.impacted,
+        "priority": file.priority,
+        "changed_ranges": file.ranges,
+    })
+}
+
+fn review_context_line_limit(max_lines_per_file: usize, token_budget: usize) -> usize {
+    let budget_based = (token_budget / 32).clamp(16, 80);
+    max_lines_per_file.max(1).min(budget_based)
+}
+
+fn review_context_snippet_for_file(
+    path: &str,
+    ranges: &[(u32, u32)],
+    line_limit: usize,
+    token_budget: usize,
+) -> Result<String> {
+    let per_file_budget = review_context_per_file_budget(token_budget);
+    let mut limit = line_limit.max(1);
+    loop {
+        let snippet = file_snippet_for_ranges(path, ranges, limit)?;
+        if approx_tokens(&snippet) <= per_file_budget || limit <= 1 {
+            return Ok(snippet);
+        }
+        limit = (limit / 2).max(1);
+    }
+}
+
+fn review_context_per_file_budget(token_budget: usize) -> usize {
+    if token_budget < 200 {
+        token_budget.max(1)
+    } else {
+        (token_budget / 3).clamp(200, token_budget)
+    }
 }
 
 fn traverse_json(
@@ -2063,23 +3720,26 @@ fn large_functions_json(graph: &Graph, min_lines: u32, limit: usize) -> Value {
 
 fn bridge_nodes_json(graph: &Graph, limit: usize) -> Value {
     let communities = leiden(graph);
-    let rows: Vec<_> = bridge_scores(graph, &communities, limit)
+    let rows: Vec<_> = bridge_scores(graph, &communities, limit.saturating_mul(4).max(limit))
         .into_iter()
         .filter_map(|row| {
-            graph.node(row.node).map(|n| {
-                json!({
-                    "id": row.node.0,
-                    "score": row.score,
-                    "communities_touched": row.communities_touched,
-                    "degree": row.degree,
-                    "approx_betweenness": row.approx_betweenness,
-                    "articulation": row.articulation,
-                    "qualified_name": n.qualified_name,
-                    "kind": n.kind,
-                    "source_uri": n.source_uri,
-                })
-            })
+            let n = graph.node(row.node)?;
+            if !is_rankable_node(n) {
+                return None;
+            }
+            Some(json!({
+                "id": row.node.0,
+                "score": row.score,
+                "communities_touched": row.communities_touched,
+                "degree": row.degree,
+                "approx_betweenness": row.approx_betweenness,
+                "articulation": row.articulation,
+                "qualified_name": n.qualified_name,
+                "kind": n.kind,
+                "source_uri": n.source_uri,
+            }))
         })
+        .take(limit)
         .collect();
     json!({ "operation": "bridge_nodes", "hits": rows })
 }
@@ -2116,16 +3776,18 @@ fn core_json(graph: &Graph, limit: usize) -> Value {
     let mut rows: Vec<_> = core
         .into_iter()
         .filter_map(|(id, coreness)| {
-            graph.node(id).map(|n| {
-                json!({
-                    "id": id.0,
-                    "core": coreness,
-                    "degree": graph.in_neighbors(id).count() + graph.out_neighbors(id).count(),
-                    "qualified_name": n.qualified_name,
-                    "kind": n.kind,
-                    "source_uri": n.source_uri,
-                })
-            })
+            let n = graph.node(id)?;
+            if !is_rankable_node(n) {
+                return None;
+            }
+            Some(json!({
+                "id": id.0,
+                "core": coreness,
+                "degree": graph.in_neighbors(id).count() + graph.out_neighbors(id).count(),
+                "qualified_name": n.qualified_name,
+                "kind": n.kind,
+                "source_uri": n.source_uri,
+            }))
         })
         .collect();
     rows.sort_by_key(|v| std::cmp::Reverse(v["core"].as_u64().unwrap_or_default()));
@@ -2138,15 +3800,17 @@ fn articulation_json(graph: &Graph, limit: usize) -> Value {
     let mut rows: Vec<_> = points
         .into_iter()
         .filter_map(|id| {
-            graph.node(id).map(|n| {
-                json!({
-                    "id": id.0,
-                    "degree": graph.in_neighbors(id).count() + graph.out_neighbors(id).count(),
-                    "qualified_name": n.qualified_name,
-                    "kind": n.kind,
-                    "source_uri": n.source_uri,
-                })
-            })
+            let n = graph.node(id)?;
+            if !is_rankable_node(n) {
+                return None;
+            }
+            Some(json!({
+                "id": id.0,
+                "degree": graph.in_neighbors(id).count() + graph.out_neighbors(id).count(),
+                "qualified_name": n.qualified_name,
+                "kind": n.kind,
+                "source_uri": n.source_uri,
+            }))
         })
         .collect();
     rows.sort_by_key(|v| std::cmp::Reverse(v["degree"].as_u64().unwrap_or_default()));
@@ -2164,22 +3828,541 @@ fn gaps_json(graph: &Graph, limit: usize) -> Value {
             .zip(n.line_end)
             .map(|(s, e)| e.saturating_sub(s) + 1)
             .unwrap_or(0);
-        if matches!(n.kind, NodeKind::Function | NodeKind::Method) && indeg == 0 {
+        if matches!(n.kind, NodeKind::Function | NodeKind::Method)
+            && indeg == 0
+            && is_rankable_node(n)
+        {
             rows.push(json!({"kind":"orphan_symbol","severity":"medium","qualified_name":n.qualified_name,"source_uri":n.source_uri}));
         }
-        if matches!(n.kind, NodeKind::Function | NodeKind::Method) && outdeg == 0 && lines > 40 {
+        if matches!(n.kind, NodeKind::Function | NodeKind::Method)
+            && outdeg == 0
+            && lines > 40
+            && is_rankable_node(n)
+        {
             rows.push(json!({"kind":"large_leaf","severity":"low","lines":lines,"qualified_name":n.qualified_name,"source_uri":n.source_uri}));
         }
-        if n.qualified_name.starts_with("call::") && indeg > 0 {
-            rows.push(
-                json!({"kind":"unresolved_call","severity":"high","call":n.name,"incoming":indeg}),
-            );
+        if is_actionable_unresolved_call(n, indeg) {
+            rows.push(json!({
+                "kind":"unresolved_call",
+                "severity": if indeg >= 5 { "high" } else { "medium" },
+                "call":n.name,
+                "incoming":indeg
+            }));
         }
         if rows.len() >= limit {
             break;
         }
     }
     json!({ "operation": "gaps", "hits": rows })
+}
+
+fn surprises_json(graph: &Graph, limit: usize) -> Value {
+    let communities = leiden(graph);
+    let degrees: HashMap<NodeId, usize> = graph
+        .nodes()
+        .map(|(id, _)| {
+            (
+                id,
+                graph.in_neighbors(id).count() + graph.out_neighbors(id).count(),
+            )
+        })
+        .collect();
+    let avg_degree = if degrees.is_empty() {
+        0.0
+    } else {
+        degrees.values().sum::<usize>() as f64 / degrees.len() as f64
+    };
+    let hub_threshold = ((avg_degree * 3.0).ceil() as usize).max(12);
+
+    let mut rows = Vec::new();
+    for (edge_id, src, dst, edge) in graph.edges() {
+        let Some(src_node) = graph.node(src) else {
+            continue;
+        };
+        let Some(dst_node) = graph.node(dst) else {
+            continue;
+        };
+        if src_node.qualified_name.starts_with("call::")
+            || dst_node.qualified_name.starts_with("call::")
+            || is_test_like_node(src_node)
+            || is_test_like_node(dst_node)
+            || (matches!(edge.kind, ariadne_graph::EdgeKind::Calls)
+                && src_node.source_uri != dst_node.source_uri
+                && is_generic_utility_name(&dst_node.name))
+        {
+            continue;
+        }
+
+        let src_comm = communities.get(&src).copied().unwrap_or(0);
+        let dst_comm = communities.get(&dst).copied().unwrap_or(0);
+        let src_degree = degrees.get(&src).copied().unwrap_or(0);
+        let dst_degree = degrees.get(&dst).copied().unwrap_or(0);
+        let src_language = source_language(src_node.source_uri.as_deref());
+        let dst_language = source_language(dst_node.source_uri.as_deref());
+        let cross_language =
+            src_language.is_some() && dst_language.is_some() && src_language != dst_language;
+        let src_category = source_category(src_node.source_uri.as_deref());
+        let dst_category = source_category(dst_node.source_uri.as_deref());
+        let code_doc_boundary = matches!(
+            (src_category, dst_category),
+            (Some("code"), Some("doc")) | (Some("doc"), Some("code"))
+        );
+        let placeholder_resolution = edge
+            .properties
+            .get("resolved_from")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with("call_placeholder::"));
+        if matches!(edge.kind, ariadne_graph::EdgeKind::Calls)
+            && placeholder_resolution
+            && (cross_language || code_doc_boundary || is_generic_utility_name(&dst_node.name))
+        {
+            continue;
+        }
+        let mut score = 0.0;
+        let mut reasons = Vec::new();
+
+        if src_comm != dst_comm {
+            score += 4.0;
+            reasons.push("cross_community");
+        }
+        if src_node.source_uri != dst_node.source_uri
+            && src_node.source_uri.is_some()
+            && dst_node.source_uri.is_some()
+        {
+            score += 1.0;
+            reasons.push("cross_file");
+        }
+        if cross_language {
+            score += 3.0;
+            reasons.push("cross_language");
+        }
+        if src_degree <= 2 && dst_degree >= hub_threshold {
+            score += 3.0;
+            reasons.push("peripheral_to_hub");
+        }
+        if matches!(edge.confidence, ariadne_graph::Confidence::Ambiguous) {
+            score += 3.0;
+            reasons.push("ambiguous_edge");
+        } else if edge.confidence.class_str() == "inferred" {
+            score += (1.0 - edge.confidence.score() as f64).max(0.0) * 2.0 + 1.0;
+            reasons.push("inferred_edge");
+        }
+
+        if reasons.is_empty() {
+            continue;
+        }
+
+        rows.push(json!({
+            "id": edge_id.0,
+            "score": score,
+            "reasons": reasons,
+            "edge_kind": edge.kind,
+            "confidence": edge.confidence.score(),
+            "confidence_class": edge.confidence.class_str(),
+            "source": node_ref_json(src, src_node, src_comm, src_degree),
+            "target": node_ref_json(dst, dst_node, dst_comm, dst_degree),
+        }));
+    }
+    rows.sort_by(|a, b| {
+        b["score"]
+            .as_f64()
+            .partial_cmp(&a["score"].as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let total = rows.len();
+    rows.truncate(limit);
+    json!({
+        "operation": "surprises",
+        "summary": {
+            "total": total,
+            "returned": rows.len(),
+            "hub_threshold": hub_threshold,
+        },
+        "hits": rows,
+        "suggested_next_tools": ["traverse", "impact", "review_context", "architecture_overview"]
+    })
+}
+
+fn diagnostics_json(
+    graph: &Graph,
+    fts_count: usize,
+    embedding_count: usize,
+    embedding_model: Option<String>,
+    limit: usize,
+) -> Value {
+    let mut kind_counts: HashMap<String, usize> = HashMap::new();
+    let mut source_counts: HashMap<String, usize> = HashMap::new();
+    let mut missing_source_nodes = Vec::new();
+    let mut unresolved_calls = Vec::new();
+    let mut isolated_rankable = 0usize;
+
+    for (id, node) in graph.nodes() {
+        *kind_counts.entry(format!("{:?}", node.kind)).or_insert(0) += 1;
+        if let Some(source) = &node.source_uri {
+            *source_counts.entry(source.clone()).or_insert(0) += 1;
+            if missing_source_nodes.len() < limit && !Path::new(source).exists() {
+                missing_source_nodes.push(json!({
+                    "id": id.0,
+                    "qualified_name": node.qualified_name,
+                    "source_uri": source,
+                }));
+            }
+        }
+        if node.qualified_name.starts_with("call::") {
+            let incoming = graph.in_neighbors(id).count();
+            if incoming > 0 {
+                unresolved_calls.push((
+                    incoming,
+                    id,
+                    node.qualified_name.clone(),
+                    node.name.clone(),
+                ));
+            }
+        }
+        if is_rankable_node(node)
+            && graph.in_neighbors(id).count() + graph.out_neighbors(id).count() == 0
+        {
+            isolated_rankable += 1;
+        }
+    }
+
+    let mut confidence_counts: HashMap<String, usize> = HashMap::new();
+    let mut edge_kind_counts: HashMap<String, usize> = HashMap::new();
+    let mut pair_counts: HashMap<(NodeId, NodeId, String), usize> = HashMap::new();
+    let mut self_loop_edges = 0usize;
+    for (_, src, dst, edge) in graph.edges() {
+        *confidence_counts
+            .entry(edge.confidence.class_str().to_string())
+            .or_insert(0) += 1;
+        *edge_kind_counts
+            .entry(format!("{:?}", edge.kind))
+            .or_insert(0) += 1;
+        *pair_counts
+            .entry((src, dst, format!("{:?}", edge.kind)))
+            .or_insert(0) += 1;
+        if src == dst {
+            self_loop_edges += 1;
+        }
+    }
+
+    unresolved_calls.sort_by_key(|(incoming, _, _, _)| std::cmp::Reverse(*incoming));
+    let unresolved_call_hits: Vec<_> = unresolved_calls
+        .iter()
+        .take(limit)
+        .map(|(incoming, id, qualified_name, name)| {
+            json!({
+                "id": id.0,
+                "call": name,
+                "qualified_name": qualified_name,
+                "incoming": incoming,
+                "actionable": graph.node(*id).is_some_and(|n| is_actionable_unresolved_call(n, *incoming)),
+            })
+        })
+        .collect();
+
+    let duplicate_endpoint_groups = pair_counts.values().filter(|&&count| count > 1).count();
+    let duplicate_endpoint_edges: usize = pair_counts
+        .values()
+        .filter(|&&count| count > 1)
+        .map(|count| count - 1)
+        .sum();
+
+    let mut top_sources: Vec<_> = source_counts.into_iter().collect();
+    top_sources.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let top_sources: Vec<_> = top_sources
+        .into_iter()
+        .take(limit)
+        .map(|(source, nodes)| json!({ "source": source, "nodes": nodes }))
+        .collect();
+
+    let mut kind_counts: Vec<_> = kind_counts.into_iter().collect();
+    kind_counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let kind_counts: Vec<_> = kind_counts
+        .into_iter()
+        .map(|(kind, count)| json!({ "kind": kind, "count": count }))
+        .collect();
+
+    let mut edge_kind_counts: Vec<_> = edge_kind_counts.into_iter().collect();
+    edge_kind_counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let edge_kind_counts: Vec<_> = edge_kind_counts
+        .into_iter()
+        .map(|(kind, count)| json!({ "kind": kind, "count": count }))
+        .collect();
+
+    let node_count = graph.node_count();
+    let edge_count = graph.edge_count();
+    let fts_coverage = ratio(fts_count, node_count);
+    let embedding_coverage = ratio(embedding_count, node_count);
+    let unresolved_count = unresolved_calls.len();
+    let ambiguous_edges = *confidence_counts.get("ambiguous").unwrap_or(&0);
+    let inferred_edges = *confidence_counts.get("inferred").unwrap_or(&0);
+
+    let mut warnings = Vec::new();
+    if fts_count < node_count {
+        warnings.push(json!({
+            "kind": "fts_incomplete",
+            "severity": if fts_coverage < 0.8 { "medium" } else { "low" },
+            "message": "FTS index has fewer rows than graph nodes; run rebuild_fts.",
+        }));
+    }
+    if embedding_count > 0 && embedding_count < node_count {
+        warnings.push(json!({
+            "kind": "embedding_incomplete",
+            "severity": if embedding_coverage < 0.8 { "medium" } else { "low" },
+            "message": "Semantic embeddings cover only part of the graph; rerun embed.",
+        }));
+    }
+    if embedding_model
+        .as_deref()
+        .is_some_and(|model| model != DEFAULT_EMBEDDING_MODEL)
+    {
+        warnings.push(json!({
+            "kind": "embedding_model_stale",
+            "severity": "medium",
+            "message": format!("Embeddings use an older model; rerun embed to rebuild with {}.", DEFAULT_EMBEDDING_MODEL),
+        }));
+    }
+    if unresolved_count > node_count / 10 {
+        warnings.push(json!({
+            "kind": "many_unresolved_calls",
+            "severity": "medium",
+            "message": "A large share of nodes are unresolved call placeholders.",
+        }));
+    }
+    if ambiguous_edges > edge_count / 5 && edge_count > 0 {
+        warnings.push(json!({
+            "kind": "high_ambiguity",
+            "severity": "medium",
+            "message": "More than 20% of edges are ambiguous.",
+        }));
+    }
+    if duplicate_endpoint_groups > 0 {
+        warnings.push(json!({
+            "kind": "duplicate_edge_endpoints",
+            "severity": "low",
+            "message": "Multiple edges share the same source, target, and kind.",
+        }));
+    }
+
+    json!({
+        "operation": "diagnostics",
+        "summary": {
+            "nodes": node_count,
+            "edges": edge_count,
+            "rankable_isolated_nodes": isolated_rankable,
+            "unresolved_call_nodes": unresolved_count,
+            "self_loop_edges": self_loop_edges,
+            "duplicate_endpoint_groups": duplicate_endpoint_groups,
+            "duplicate_endpoint_extra_edges": duplicate_endpoint_edges,
+        },
+        "confidence": {
+            "counts": confidence_counts,
+            "ambiguous_edges": ambiguous_edges,
+            "inferred_edges": inferred_edges,
+        },
+        "indexes": {
+            "fts5": {
+                "indexed_nodes": fts_count,
+                "coverage": fts_coverage,
+            },
+            "embeddings": {
+                "indexed_nodes": embedding_count,
+                "coverage": embedding_coverage,
+                "model": embedding_model,
+            },
+        },
+        "node_kinds": kind_counts,
+        "edge_kinds": edge_kind_counts,
+        "top_sources": top_sources,
+        "unresolved_calls": unresolved_call_hits,
+        "missing_source_nodes": missing_source_nodes,
+        "warnings": warnings,
+        "suggested_next_tools": ["gaps", "surprises", "bridge_nodes", "rebuild_fts", "embed"]
+    })
+}
+
+fn graph_report_markdown(
+    graph: &Graph,
+    fts_count: usize,
+    embedding_count: usize,
+    embedding_model: Option<String>,
+    top: usize,
+) -> String {
+    let diagnostics = diagnostics_json(graph, fts_count, embedding_count, embedding_model, top);
+    let bridges = bridge_nodes_json(graph, top);
+    let gaps = gaps_json(graph, top);
+    let surprises = surprises_json(graph, top);
+    let questions = suggested_questions_json(&json!({}), top);
+    let god_nodes = god_nodes_report_rows(graph, top);
+
+    let mut out = String::new();
+    let _ = writeln!(&mut out, "# Ariadne Graph Report");
+    let _ = writeln!(&mut out);
+    if let Ok(Some(commit)) = git_commit_hash("HEAD") {
+        let _ = writeln!(&mut out, "- Git commit: `{}`", commit);
+    }
+    let _ = writeln!(
+        &mut out,
+        "- Nodes: {}",
+        diagnostics["summary"]["nodes"].as_u64().unwrap_or_default()
+    );
+    let _ = writeln!(
+        &mut out,
+        "- Edges: {}",
+        diagnostics["summary"]["edges"].as_u64().unwrap_or_default()
+    );
+    let _ = writeln!(
+        &mut out,
+        "- FTS coverage: {:.1}%",
+        diagnostics["indexes"]["fts5"]["coverage"]
+            .as_f64()
+            .unwrap_or_default()
+            * 100.0
+    );
+    let _ = writeln!(
+        &mut out,
+        "- Embedding coverage: {:.1}%",
+        diagnostics["indexes"]["embeddings"]["coverage"]
+            .as_f64()
+            .unwrap_or_default()
+            * 100.0
+    );
+
+    append_warning_section(&mut out, &diagnostics);
+    append_report_hits(&mut out, "God Nodes", &god_nodes, |row| {
+        format!(
+            "`{}` ({}, score {:.4})",
+            row["qualified_name"].as_str().unwrap_or(""),
+            row["kind"].as_str().unwrap_or("unknown"),
+            row["score"].as_f64().unwrap_or_default()
+        )
+    });
+    append_report_hits(&mut out, "Bridge Nodes", &bridges["hits"], |row| {
+        format!(
+            "`{}` (score {:.2}, degree {})",
+            row["qualified_name"].as_str().unwrap_or(""),
+            row["score"].as_f64().unwrap_or_default(),
+            row["degree"].as_u64().unwrap_or_default()
+        )
+    });
+    append_report_hits(&mut out, "Surprising Edges", &surprises["hits"], |row| {
+        format!(
+            "`{}` -> `{}` ({})",
+            row["source"]["qualified_name"].as_str().unwrap_or(""),
+            row["target"]["qualified_name"].as_str().unwrap_or(""),
+            row["reasons"]
+                .as_array()
+                .map(|reasons| {
+                    reasons
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default()
+        )
+    });
+    append_report_hits(&mut out, "Knowledge Gaps", &gaps["hits"], |row| {
+        format!(
+            "{}: `{}`",
+            row["kind"].as_str().unwrap_or("gap"),
+            row["qualified_name"]
+                .as_str()
+                .or_else(|| row["call"].as_str())
+                .unwrap_or("")
+        )
+    });
+    append_report_hits(
+        &mut out,
+        "Suggested Questions",
+        &questions["questions"],
+        |row| row.as_str().unwrap_or("").to_string(),
+    );
+
+    out
+}
+
+fn god_nodes_report_rows(graph: &Graph, limit: usize) -> Value {
+    let ranks = pagerank(graph, 0.85, 50);
+    let mut sorted: Vec<_> = ranks.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let hits: Vec<_> = sorted
+        .into_iter()
+        .filter_map(|(id, score)| {
+            let node = graph.node(id)?;
+            is_rankable_node(node).then(|| {
+                json!({
+                    "id": id.0,
+                    "score": score,
+                    "qualified_name": node.qualified_name,
+                    "kind": format!("{:?}", node.kind),
+                    "source_uri": node.source_uri,
+                })
+            })
+        })
+        .take(limit)
+        .collect();
+    Value::Array(hits)
+}
+
+fn append_warning_section(out: &mut String, diagnostics: &Value) {
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Graph Health");
+    if let Some(warnings) = diagnostics["warnings"].as_array() {
+        if warnings.is_empty() {
+            let _ = writeln!(out, "- No health warnings.");
+            return;
+        }
+        for warning in warnings {
+            let _ = writeln!(
+                out,
+                "- **{}**: {}",
+                warning["severity"].as_str().unwrap_or("info"),
+                warning["message"].as_str().unwrap_or("")
+            );
+        }
+    }
+}
+
+fn append_report_hits<F>(out: &mut String, title: &str, hits: &Value, render: F)
+where
+    F: Fn(&Value) -> String,
+{
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## {}", title);
+    let Some(rows) = hits.as_array() else {
+        let _ = writeln!(out, "- None.");
+        return;
+    };
+    if rows.is_empty() {
+        let _ = writeln!(out, "- None.");
+        return;
+    }
+    for row in rows {
+        let rendered = render(row);
+        if !rendered.trim().is_empty() {
+            let _ = writeln!(out, "- {}", rendered);
+        }
+    }
+}
+
+fn ratio(part: usize, total: usize) -> f64 {
+    if total == 0 {
+        1.0
+    } else {
+        part as f64 / total as f64
+    }
+}
+
+fn node_ref_json(id: NodeId, node: &ariadne_graph::Node, community: usize, degree: usize) -> Value {
+    json!({
+        "id": id.0,
+        "qualified_name": node.qualified_name,
+        "kind": node.kind,
+        "source_uri": node.source_uri,
+        "community": community,
+        "degree": degree,
+    })
 }
 
 fn suggested_questions_json(analysis: &Value, limit: usize) -> Value {
@@ -2494,16 +4677,69 @@ fn test_coverage_json(graph: &Graph, changed_nodes: &[NodeId]) -> Value {
             "tests": tests,
         });
         if tests.is_empty() {
-            missing.push(entry);
+            let mut missing_entry = entry;
+            missing_entry["nearby_tests"] = Value::Array(nearby_tests_json(graph, id, 6));
+            missing.push(missing_entry);
         } else {
             covered.push(entry);
         }
     }
+    let covered_count = covered.len();
+    let missing_count = missing.len();
+    let total = covered_count + missing_count;
     json!({
         "covered": covered,
+        "covered_count": covered_count,
         "missing": missing,
-        "missing_count": missing.len(),
+        "missing_count": missing_count,
+        "total_symbols": total,
+        "coverage_ratio": if total == 0 {
+            1.0
+        } else {
+            covered_count as f64 / total as f64
+        },
     })
+}
+
+fn nearby_tests_json(graph: &Graph, id: NodeId, limit: usize) -> Vec<Value> {
+    let mut seen_neighbors = HashSet::new();
+    let mut neighbors = Vec::new();
+    for (neighbor, edge) in graph.out_neighbors(id) {
+        if edge.kind == ariadne_graph::EdgeKind::Calls && seen_neighbors.insert(neighbor) {
+            neighbors.push(neighbor);
+        }
+    }
+    for (neighbor, edge) in graph.in_neighbors(id) {
+        if edge.kind == ariadne_graph::EdgeKind::Calls && seen_neighbors.insert(neighbor) {
+            neighbors.push(neighbor);
+        }
+    }
+
+    let mut seen_tests = HashSet::new();
+    let mut out = Vec::new();
+    for neighbor in neighbors {
+        let via = graph
+            .node(neighbor)
+            .map(|node| node.qualified_name.clone())
+            .unwrap_or_else(|| format!("node:{}", neighbor.0));
+        for (test_id, edge) in graph.out_neighbors(neighbor) {
+            if edge.kind != ariadne_graph::EdgeKind::TestedBy || !seen_tests.insert(test_id) {
+                continue;
+            }
+            if let Some(test) = graph.node(test_id) {
+                out.push(json!({
+                    "id": test_id.0,
+                    "qualified_name": test.qualified_name,
+                    "source_uri": test.source_uri,
+                    "via": via,
+                }));
+            }
+            if out.len() >= limit {
+                return out;
+            }
+        }
+    }
+    out
 }
 
 /// Flows touched by the changed symbols. Ranked by criticality
@@ -2706,8 +4942,12 @@ fn install_mcp_config(repo: &Path, db: &Path) -> Result<()> {
     println!("installed {}", vscode_path.display());
 
     let codex_dir = repo.join(".codex");
-    fs::create_dir_all(&codex_dir)?;
-    let codex_path = codex_dir.join("ariadne-mcp.toml");
+    let codex_path = if codex_dir.exists() && !codex_dir.is_dir() {
+        repo.join(".codex-ariadne-mcp.toml")
+    } else {
+        fs::create_dir_all(&codex_dir)?;
+        codex_dir.join("ariadne-mcp.toml")
+    };
     fs::write(&codex_path, codex_mcp_toml(&exe, db))?;
     println!("installed {}", codex_path.display());
     Ok(())
@@ -2735,6 +4975,7 @@ fn vscode_mcp_config(exe: &Path, db: &Path) -> Value {
 
 fn ariadne_stdio_server_config(exe: &Path, db: &Path) -> Value {
     json!({
+        "type": "stdio",
         "command": exe,
         "args": ["--db", db, "mcp-server"]
     })
@@ -2756,6 +4997,548 @@ args = ["--db", {}, "mcp-server"]
 
 fn toml_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn export_graph(graph: &Graph, format: &str, output: &Path) -> Result<Value> {
+    match format {
+        "graphml" => write_single_export(output, &graphml_export(graph), format),
+        "cypher" | "neo4j" => write_single_export(output, &cypher_export(graph), "cypher"),
+        "obsidian" => write_obsidian_export(graph, output),
+        other => bail!(
+            "unknown export format {}; use graphml, cypher, or obsidian",
+            other
+        ),
+    }
+}
+
+fn write_single_export(output: &Path, content: &str, format: &str) -> Result<Value> {
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(output, content)?;
+    Ok(json!({
+        "operation": "export",
+        "format": format,
+        "output": output,
+        "files_written": 1,
+        "bytes": content.len(),
+    }))
+}
+
+fn graphml_export(graph: &Graph) -> String {
+    let mut out = String::new();
+    let _ = writeln!(&mut out, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+    let _ = writeln!(
+        &mut out,
+        r#"<graphml xmlns="http://graphml.graphdrawing.org/xmlns">"#
+    );
+    let _ = writeln!(
+        &mut out,
+        r#"<key id="qname" for="node" attr.name="qualified_name" attr.type="string"/>"#
+    );
+    let _ = writeln!(
+        &mut out,
+        r#"<key id="kind" for="all" attr.name="kind" attr.type="string"/>"#
+    );
+    let _ = writeln!(
+        &mut out,
+        r#"<key id="source" for="node" attr.name="source_uri" attr.type="string"/>"#
+    );
+    let _ = writeln!(
+        &mut out,
+        r#"<key id="confidence" for="edge" attr.name="confidence" attr.type="double"/>"#
+    );
+    let _ = writeln!(&mut out, r#"<graph id="ariadne" edgedefault="directed">"#);
+    for (id, node) in graph.nodes() {
+        let _ = writeln!(&mut out, r#"<node id="n{}">"#, id.0);
+        let _ = writeln!(
+            &mut out,
+            r#"<data key="qname">{}</data>"#,
+            xml_escape(&node.qualified_name)
+        );
+        let _ = writeln!(&mut out, r#"<data key="kind">{:?}</data>"#, node.kind);
+        if let Some(source) = &node.source_uri {
+            let _ = writeln!(
+                &mut out,
+                r#"<data key="source">{}</data>"#,
+                xml_escape(source)
+            );
+        }
+        let _ = writeln!(&mut out, "</node>");
+    }
+    for (id, src, dst, edge) in graph.edges() {
+        let _ = writeln!(
+            &mut out,
+            r#"<edge id="e{}" source="n{}" target="n{}">"#,
+            id.0, src.0, dst.0
+        );
+        let _ = writeln!(&mut out, r#"<data key="kind">{:?}</data>"#, edge.kind);
+        let _ = writeln!(
+            &mut out,
+            r#"<data key="confidence">{}</data>"#,
+            edge.confidence.score()
+        );
+        let _ = writeln!(&mut out, "</edge>");
+    }
+    let _ = writeln!(&mut out, "</graph>");
+    let _ = writeln!(&mut out, "</graphml>");
+    out
+}
+
+fn cypher_export(graph: &Graph) -> String {
+    let mut out = String::new();
+    let _ = writeln!(&mut out, "CREATE CONSTRAINT ariadne_node_id IF NOT EXISTS FOR (n:AriadneNode) REQUIRE n.id IS UNIQUE;");
+    for (id, node) in graph.nodes() {
+        let _ = writeln!(
+            &mut out,
+            "MERGE (n:AriadneNode {{id: {}}}) SET n.qualified_name = {}, n.name = {}, n.kind = {}, n.source_uri = {};",
+            id.0,
+            cypher_string(&node.qualified_name),
+            cypher_string(&node.name),
+            cypher_string(&format!("{:?}", node.kind)),
+            cypher_opt_string(node.source_uri.as_deref()),
+        );
+    }
+    for (_, src, dst, edge) in graph.edges() {
+        let rel = cypher_rel_type(&format!("{:?}", edge.kind));
+        let _ = writeln!(
+            &mut out,
+            "MATCH (a:AriadneNode {{id: {}}}), (b:AriadneNode {{id: {}}}) MERGE (a)-[:{} {{kind: {}, confidence: {}, confidence_class: {}}}]->(b);",
+            src.0,
+            dst.0,
+            rel,
+            cypher_string(&format!("{:?}", edge.kind)),
+            edge.confidence.score(),
+            cypher_string(edge.confidence.class_str()),
+        );
+    }
+    out
+}
+
+fn write_obsidian_export(graph: &Graph, output: &Path) -> Result<Value> {
+    fs::create_dir_all(output)?;
+    let mut filenames = HashMap::new();
+    for (id, node) in graph.nodes() {
+        filenames.insert(id, format!("{}-{}.md", id.0, slugify(&node.name)));
+    }
+    let mut written = 0usize;
+    for (id, node) in graph.nodes() {
+        let mut page = String::new();
+        let _ = writeln!(&mut page, "# {}", node.name);
+        let _ = writeln!(&mut page);
+        let _ = writeln!(&mut page, "- Kind: `{:?}`", node.kind);
+        let _ = writeln!(&mut page, "- Qualified name: `{}`", node.qualified_name);
+        if let Some(source) = &node.source_uri {
+            let _ = writeln!(&mut page, "- Source: `{}`", source);
+        }
+        let outgoing: Vec<_> = graph.out_neighbors(id).collect();
+        if !outgoing.is_empty() {
+            let _ = writeln!(&mut page);
+            let _ = writeln!(&mut page, "## Outgoing");
+            for (target, edge) in outgoing.into_iter().take(50) {
+                if let Some(target_node) = graph.node(target) {
+                    let link = filenames
+                        .get(&target)
+                        .map(|f| f.trim_end_matches(".md"))
+                        .unwrap_or("");
+                    let _ = writeln!(
+                        &mut page,
+                        "- `{:?}` -> [[{}|{}]]",
+                        edge.kind, link, target_node.name
+                    );
+                }
+            }
+        }
+        let file = output.join(filenames.get(&id).expect("filename exists"));
+        fs::write(file, page)?;
+        written += 1;
+    }
+    fs::write(output.join("Home.md"), obsidian_home(graph, &filenames))?;
+    Ok(json!({
+        "operation": "export",
+        "format": "obsidian",
+        "output": output,
+        "files_written": written + 1,
+    }))
+}
+
+fn obsidian_home(graph: &Graph, filenames: &HashMap<NodeId, String>) -> String {
+    let mut out = String::new();
+    let _ = writeln!(&mut out, "# Ariadne Graph");
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "- Nodes: {}", graph.node_count());
+    let _ = writeln!(&mut out, "- Edges: {}", graph.edge_count());
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "## High Degree Nodes");
+    let mut nodes: Vec<_> = graph
+        .nodes()
+        .filter(|(_, node)| is_rankable_node(node))
+        .collect();
+    nodes.sort_by_key(|(id, _)| {
+        std::cmp::Reverse(graph.in_neighbors(*id).count() + graph.out_neighbors(*id).count())
+    });
+    for (id, node) in nodes.into_iter().take(25) {
+        let Some(file) = filenames.get(&id) else {
+            continue;
+        };
+        let link = file.trim_end_matches(".md");
+        let degree = graph.in_neighbors(id).count() + graph.out_neighbors(id).count();
+        let _ = writeln!(
+            &mut out,
+            "- [[{}|{}]] ({:?}, degree {})",
+            link, node.name, node.kind, degree
+        );
+    }
+    out
+}
+
+fn write_wiki(graph: &Graph, output: &Path, top: usize) -> Result<Value> {
+    fs::create_dir_all(output)?;
+    let communities = leiden(graph);
+    let mut by_comm: HashMap<usize, Vec<NodeId>> = HashMap::new();
+    for (&node, &community) in &communities {
+        by_comm.entry(community).or_default().push(node);
+    }
+    let mut communities_sorted: Vec<_> = by_comm.into_iter().collect();
+    communities_sorted.sort_by_key(|(_, nodes)| std::cmp::Reverse(nodes.len()));
+    communities_sorted.truncate(top);
+
+    let mut index = String::new();
+    let _ = writeln!(&mut index, "# Ariadne Wiki");
+    let _ = writeln!(&mut index);
+    let _ = writeln!(&mut index, "- Nodes: {}", graph.node_count());
+    let _ = writeln!(&mut index, "- Edges: {}", graph.edge_count());
+    let _ = writeln!(&mut index);
+    let _ = writeln!(&mut index, "## Communities");
+
+    let mut written = 0usize;
+    for (community, members) in communities_sorted {
+        let title = community_title(graph, &members);
+        let filename = format!("community-{}.md", community);
+        let _ = writeln!(
+            &mut index,
+            "- [{}]({}) - {} nodes (community {})",
+            title,
+            filename,
+            members.len(),
+            community
+        );
+        let page = wiki_community_page(graph, community, &title, &members);
+        fs::write(output.join(&filename), page)?;
+        written += 1;
+    }
+    fs::write(output.join("index.md"), index)?;
+    Ok(json!({
+        "operation": "wiki",
+        "output": output,
+        "files_written": written + 1,
+    }))
+}
+
+fn wiki_community_page(graph: &Graph, community: usize, title: &str, members: &[NodeId]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(&mut out, "# {}", title);
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "- Community: {}", community);
+    let _ = writeln!(&mut out, "- Nodes: {}", members.len());
+
+    let mut files: HashMap<String, usize> = HashMap::new();
+    let mut kinds: HashMap<String, usize> = HashMap::new();
+    for id in members {
+        if let Some(node) = graph.node(*id) {
+            if let Some(source) = &node.source_uri {
+                *files.entry(source.clone()).or_insert(0) += 1;
+            }
+            *kinds.entry(format!("{:?}", node.kind)).or_insert(0) += 1;
+        }
+    }
+    let mut top_files: Vec<_> = files.into_iter().collect();
+    top_files.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let mut top_kinds: Vec<_> = kinds.into_iter().collect();
+    top_kinds.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "## Shape");
+    for (kind, count) in top_kinds {
+        let _ = writeln!(&mut out, "- {}: {}", kind, count);
+    }
+
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "## Top Files");
+    for (file, count) in top_files.into_iter().take(10) {
+        let _ = writeln!(&mut out, "- `{}`: {} nodes", file, count);
+    }
+
+    let ranked = ranked_display_members(graph, members);
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "## Key Nodes");
+    for id in ranked.into_iter().take(25) {
+        if let Some(node) = graph.node(id) {
+            let degree = graph.in_neighbors(id).count() + graph.out_neighbors(id).count();
+            let _ = writeln!(
+                &mut out,
+                "- `{}` ({:?}, degree {})",
+                node.qualified_name, node.kind, degree
+            );
+        }
+    }
+    out
+}
+
+fn community_title(graph: &Graph, members: &[NodeId]) -> String {
+    let mut file_scores: HashMap<String, usize> = HashMap::new();
+    let mut module_scores: HashMap<String, usize> = HashMap::new();
+    for id in members {
+        let Some(node) = graph.node(*id) else {
+            continue;
+        };
+        if let Some(source) = &node.source_uri {
+            let label = source_label(source);
+            *file_scores.entry(label.clone()).or_insert(0) += 1;
+            if let Some(module) = module_label(&label) {
+                *module_scores.entry(module).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut modules: Vec<_> = module_scores.into_iter().collect();
+    modules.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let mut files: Vec<_> = file_scores.into_iter().collect();
+    files.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+
+    if let Some((module, count)) = modules.first() {
+        if *count >= 3 {
+            return title_case_words(module);
+        }
+    }
+    if let Some((file, _)) = files.first() {
+        return title_case_words(file);
+    }
+
+    for id in ranked_display_members(graph, members) {
+        if let Some(node) = graph.node(id) {
+            if !node.qualified_name.starts_with("call::") {
+                return title_case_words(&node.name);
+            }
+        }
+    }
+    "Unclassified Community".to_string()
+}
+
+fn ranked_display_members(graph: &Graph, members: &[NodeId]) -> Vec<NodeId> {
+    let mut ranked: Vec<_> = members
+        .iter()
+        .copied()
+        .filter(|id| {
+            graph
+                .node(*id)
+                .map(|node| is_rankable_node(node) && !is_test_like_node(node))
+                .unwrap_or(false)
+        })
+        .collect();
+    if ranked.is_empty() {
+        ranked = members.to_vec();
+    }
+    ranked.sort_by_key(|id| {
+        std::cmp::Reverse(graph.in_neighbors(*id).count() + graph.out_neighbors(*id).count())
+    });
+    ranked
+}
+
+fn source_label(source: &str) -> String {
+    let path = Path::new(source);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(source)
+        .trim_matches('.');
+    if stem == "mod" || stem == "lib" {
+        path.parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or(stem)
+            .to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
+fn module_label(file_label: &str) -> Option<String> {
+    let normalized = file_label.replace('-', "_");
+    let head = normalized.split('_').next()?.trim();
+    (head.len() >= 3).then(|| head.to_string())
+}
+
+fn title_case_words(value: &str) -> String {
+    let words: Vec<_> = value
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut out = String::new();
+                    out.push(first.to_ascii_uppercase());
+                    out.push_str(&chars.as_str().to_ascii_lowercase());
+                    out
+                }
+                None => String::new(),
+            }
+        })
+        .collect();
+    if words.is_empty() {
+        "Unclassified Community".to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
+fn source_language(source: Option<&str>) -> Option<String> {
+    let ext = Path::new(source?).extension()?.to_string_lossy();
+    let lang = match ext.as_ref() {
+        "rs" => "rust",
+        "py" => "python",
+        "cpp" | "cc" | "cxx" | "hpp" | "h" => "cpp",
+        "md" => "markdown",
+        "tex" => "latex",
+        "svg" => "svg",
+        other => other,
+    };
+    Some(lang.to_string())
+}
+
+fn source_category(source: Option<&str>) -> Option<&'static str> {
+    let ext = Path::new(source?).extension()?.to_str()?;
+    match ext {
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx" | "py" | "rs" => Some("code"),
+        "md" | "markdown" | "tex" => Some("doc"),
+        "svg" => Some("image"),
+        _ => None,
+    }
+}
+
+fn is_source_like_path(path: &str) -> bool {
+    matches!(
+        Path::new(path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or(""),
+        "c" | "cc"
+            | "cpp"
+            | "cxx"
+            | "go"
+            | "h"
+            | "hpp"
+            | "java"
+            | "js"
+            | "jsx"
+            | "kt"
+            | "py"
+            | "rs"
+            | "scala"
+            | "swift"
+            | "ts"
+            | "tsx"
+    )
+}
+
+fn is_doc_like_path(path: &str) -> bool {
+    matches!(
+        Path::new(path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or(""),
+        "adoc" | "md" | "mdx" | "rst" | "txt"
+    )
+}
+
+fn is_low_signal_review_path(path: &str) -> bool {
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+    matches!(
+        file_name,
+        "Cargo.lock"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "poetry.lock"
+            | "Pipfile.lock"
+            | "go.sum"
+    ) || path.contains("/target/")
+        || path.contains("\\target\\")
+        || path.contains("/dist/")
+        || path.contains("\\dist\\")
+        || path.contains("/build/")
+        || path.contains("\\build\\")
+}
+
+fn is_test_like_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.contains("/tests/")
+        || normalized.contains("/test/")
+        || normalized.ends_with("_test.rs")
+        || normalized.ends_with("_test.py")
+        || normalized.ends_with(".test.js")
+        || normalized.ends_with(".test.ts")
+        || normalized.ends_with(".spec.js")
+        || normalized.ends_with(".spec.ts")
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn cypher_string(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+fn cypher_opt_string(value: Option<&str>) -> String {
+    value
+        .map(cypher_string)
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn cypher_rel_type(value: &str) -> String {
+    let rel: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if rel.is_empty() {
+        "RELATED".to_string()
+    } else {
+        rel
+    }
+}
+
+fn slugify(value: &str) -> String {
+    let mut out = String::new();
+    for c in value.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "node".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn handle_http(mut stream: TcpStream, db: &Path, algorithm: &str) -> Result<()> {
@@ -3028,7 +5811,7 @@ fn resolve(graph: &Graph, name: &str) -> Result<NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ariadne_graph::Node;
+    use ariadne_graph::{Edge, Node};
 
     #[test]
     fn parses_zero_context_git_diff_hunks() {
@@ -3146,6 +5929,11 @@ deleted file mode 100644
         let db = Path::new("/repo/ariadne.db");
 
         let shared = mcp_servers_config(exe, db);
+        assert_eq!(shared["mcpServers"]["ariadne"]["type"], "stdio");
+        assert_eq!(
+            shared["mcpServers"]["ariadne"]["command"],
+            "/opt/ariadne/bin/ariadne"
+        );
         assert_eq!(
             shared["mcpServers"]["ariadne"]["args"],
             json!(["--db", "/repo/ariadne.db", "mcp-server"])
@@ -3161,6 +5949,73 @@ deleted file mode 100644
         let codex = codex_mcp_toml(exe, db);
         assert!(codex.contains("[mcp_servers.ariadne]"));
         assert!(codex.contains("args = [\"--db\", \"/repo/ariadne.db\", \"mcp-server\"]"));
+    }
+
+    #[test]
+    fn install_mcp_config_falls_back_when_codex_is_file() {
+        let root = std::env::temp_dir().join(format!("ariadne-install-mcp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".codex"), "existing config file").unwrap();
+
+        install_mcp_config(&root, Path::new("/repo/ariadne.db")).unwrap();
+
+        assert!(root.join(".mcp.json").is_file());
+        assert!(root.join(".cursor/mcp.json").is_file());
+        assert!(root.join(".vscode/mcp.json").is_file());
+        assert!(root.join(".codex-ariadne-mcp.toml").is_file());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reads_framed_mcp_message() {
+        let mut reader = BufReader::new(
+            b"Content-Length: 46\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}"
+                .as_slice(),
+        );
+        let message = read_mcp_message(&mut reader).unwrap().unwrap();
+        assert_eq!(message.framing, McpFraming::ContentLength);
+        assert!(message.body.contains("\"method\":\"initialize\""));
+    }
+
+    #[test]
+    fn reads_json_line_mcp_message() {
+        let mut reader = BufReader::new(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n".as_slice(),
+        );
+        let message = read_mcp_message(&mut reader).unwrap().unwrap();
+        assert_eq!(message.framing, McpFraming::JsonLine);
+        assert!(message.body.contains("\"method\":\"initialize\""));
+    }
+
+    #[test]
+    fn writes_json_line_mcp_response() {
+        let mut output = Vec::new();
+        write_mcp_message(
+            &mut output,
+            &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            McpFraming::JsonLine,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.starts_with('{'));
+        assert!(text.ends_with('\n'));
+        assert!(!text.contains("Content-Length"));
+    }
+
+    #[test]
+    fn writes_framed_mcp_response() {
+        let mut output = Vec::new();
+        write_mcp_message(
+            &mut output,
+            &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            McpFraming::ContentLength,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.starts_with("Content-Length:"));
+        assert!(text.contains("\r\n\r\n{"));
     }
 
     #[test]
@@ -3192,5 +6047,272 @@ deleted file mode 100644
             true
         );
         assert_eq!(guarded["graph_summary"]["node_count"], 2);
+    }
+
+    #[test]
+    fn blast_radius_groups_symbols_and_files() {
+        let changed = vec![
+            json!({
+                "kind": "function",
+                "qualified_name": "src/lib.rs::parse",
+                "source_uri": "src/lib.rs",
+            }),
+            json!({
+                "kind": "class",
+                "qualified_name": "src/model.rs::User",
+                "source_uri": "src/model.rs",
+            }),
+        ];
+        let impacted = vec![json!({
+            "kind": "method",
+            "qualified_name": "src/main.rs::App::run",
+            "source_uri": "src/main.rs",
+            "score": 0.8,
+        })];
+
+        let groups = blast_symbol_groups(&changed, 10);
+        assert_eq!(groups["functions"].as_array().unwrap().len(), 1);
+        assert_eq!(groups["classes"].as_array().unwrap().len(), 1);
+
+        let files = blast_affected_files(&[json!("src/lib.rs")], &changed, &impacted, 10);
+        assert_eq!(files.as_array().unwrap().len(), 3);
+        let lib = files
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["path"] == "src/lib.rs")
+            .unwrap();
+        assert_eq!(lib["changed_symbols"], 1);
+    }
+
+    #[test]
+    fn surprises_rank_cross_file_edges() {
+        let mut graph = Graph::new();
+        let a = graph.add_node(
+            Node::new(NodeKind::Function, "file::src/a.rs::a").with_source("src/a.rs", 1, 3),
+        );
+        let b = graph.add_node(
+            Node::new(NodeKind::Function, "file::src/b.py::b").with_source("src/b.py", 1, 3),
+        );
+        graph.add_edge(a, b, Edge::inferred(ariadne_graph::EdgeKind::Calls, 0.5));
+
+        let out = surprises_json(&graph, 10);
+        assert_eq!(out["operation"], "surprises");
+        assert!(!out["hits"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn surprises_suppress_cross_language_placeholder_resolution_noise() {
+        let mut graph = Graph::new();
+        let src = graph.add_node(
+            Node::new(NodeKind::Function, "file::src/a.rs::parse").with_source("src/a.rs", 1, 3),
+        );
+        let dst = graph.add_node(
+            Node::new(NodeKind::Function, "file::src/b.py::parse").with_source("src/b.py", 1, 3),
+        );
+        let mut edge = Edge::extracted(ariadne_graph::EdgeKind::Calls);
+        edge.properties.insert(
+            "resolved_from".to_string(),
+            json!("call_placeholder::unique_name"),
+        );
+        graph.add_edge(src, dst, edge);
+
+        let out = surprises_json(&graph, 10);
+        assert!(out["hits"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn diagnostics_reports_graph_health_signals() {
+        let mut graph = Graph::new();
+        let a = graph.add_node(
+            Node::new(NodeKind::Function, "file::src/a.rs::a").with_source("src/a.rs", 1, 3),
+        );
+        let call = graph.add_node(Node::new(
+            NodeKind::Function,
+            "call::domain_specific_helper",
+        ));
+        graph.add_edge(a, call, Edge::ambiguous(ariadne_graph::EdgeKind::Calls));
+
+        let out = diagnostics_json(&graph, 1, 1, Some("old-model".to_string()), 10);
+
+        assert_eq!(out["operation"], "diagnostics");
+        assert_eq!(out["summary"]["nodes"], 2);
+        assert_eq!(out["summary"]["unresolved_call_nodes"], 1);
+        assert_eq!(out["confidence"]["ambiguous_edges"], 1);
+        assert!(out["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["kind"] == "embedding_model_stale"));
+    }
+
+    #[test]
+    fn graph_report_includes_health_and_report_sections() {
+        let mut graph = Graph::new();
+        let a = graph.add_node(
+            Node::new(NodeKind::Function, "file::src/a.rs::a").with_source("src/a.rs", 1, 3),
+        );
+        let b = graph.add_node(
+            Node::new(NodeKind::Function, "file::src/b.rs::b").with_source("src/b.rs", 1, 3),
+        );
+        graph.add_edge(a, b, Edge::inferred(ariadne_graph::EdgeKind::Calls, 0.5));
+
+        let report = graph_report_markdown(&graph, 2, 0, None, 5);
+
+        assert!(report.contains("# Ariadne Graph Report"));
+        assert!(report.contains("## Graph Health"));
+        assert!(report.contains("## God Nodes"));
+        assert!(report.contains("## Knowledge Gaps"));
+    }
+
+    #[test]
+    fn export_helpers_escape_content() {
+        assert_eq!(xml_escape("a<&>\""), "a&lt;&amp;&gt;&quot;");
+        assert_eq!(cypher_string("can't"), "'can\\'t'");
+        assert_eq!(cypher_rel_type("Calls"), "CALLS");
+        assert_eq!(slugify("Graph::Node!"), "graph-node");
+    }
+
+    #[test]
+    fn community_title_uses_dominant_source() {
+        let mut graph = Graph::new();
+        let a = graph.add_node(
+            Node::new(NodeKind::Function, "file::src/query/search.rs::rank").with_source(
+                "src/query/search.rs",
+                1,
+                3,
+            ),
+        );
+        let b = graph.add_node(
+            Node::new(NodeKind::Function, "file::src/query/search.rs::score").with_source(
+                "src/query/search.rs",
+                5,
+                8,
+            ),
+        );
+        let c = graph.add_node(
+            Node::new(NodeKind::Function, "file::src/query/paths.rs::path").with_source(
+                "src/query/paths.rs",
+                1,
+                3,
+            ),
+        );
+
+        assert_eq!(community_title(&graph, &[a, b, c]), "Search");
+    }
+
+    #[test]
+    fn communities_json_includes_quality_metrics_and_options() {
+        let mut graph = Graph::new();
+        let a = graph.add_node(Node::new(NodeKind::Function, "a"));
+        let b = graph.add_node(Node::new(NodeKind::Function, "b"));
+        graph.add_edge(a, b, Edge::extracted(ariadne_graph::EdgeKind::Calls));
+        graph.add_edge(b, a, Edge::extracted(ariadne_graph::EdgeKind::Calls));
+
+        let options = community_options(1.25, 0.75, 10, 3, false, CommunityObjective::Modularity);
+        let out = communities_json(&graph, "leiden", options, 5).unwrap();
+
+        assert_eq!(out["operation"], "communities");
+        assert_eq!(out["algorithm"], "leiden");
+        assert_eq!(out["options"]["resolution"], 1.25);
+        assert_eq!(out["options"]["parallel"], false);
+        assert_eq!(out["quality"]["disconnected_communities"], 0);
+        assert_eq!(out["communities"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn token_scenario_reports_savings_ratio() {
+        let scenario = token_scenario("review_context", 25, 100);
+        assert_eq!(scenario["ratio_vs_baseline"], 4.0);
+        assert_eq!(scenario["savings_percent"], 75.0);
+    }
+
+    #[test]
+    fn review_context_prioritizes_changed_source_over_lockfiles() {
+        let mut lockfile = ReviewContextFile {
+            path: "Cargo.lock".to_string(),
+            changed: true,
+            impacted: false,
+            ranges: vec![(10, 30)],
+            priority: 0,
+        };
+        let mut source = ReviewContextFile {
+            path: "crates/ariadne-graph/src/main.rs".to_string(),
+            changed: true,
+            impacted: true,
+            ranges: vec![(120, 140)],
+            priority: 0,
+        };
+        lockfile.priority = review_context_priority(&lockfile);
+        source.priority = review_context_priority(&source);
+
+        assert!(source.priority > lockfile.priority);
+        assert!(is_low_signal_review_path(&lockfile.path));
+        assert!(is_source_like_path(&source.path));
+    }
+
+    #[test]
+    fn review_context_upsert_merges_changed_and_impacted_paths() {
+        let mut files = Vec::new();
+        upsert_review_context_file(&mut files, "src/lib.rs".to_string(), true, false);
+        upsert_review_context_file(&mut files, "/repo/src/lib.rs".to_string(), false, true);
+
+        assert_eq!(files.len(), 1);
+        assert!(files[0].changed);
+        assert!(files[0].impacted);
+        assert_eq!(files[0].path, "/repo/src/lib.rs");
+    }
+
+    #[test]
+    fn review_context_budgets_per_file_context() {
+        assert_eq!(review_context_line_limit(200, 1600), 50);
+        assert_eq!(review_context_line_limit(8, 1600), 8);
+        assert_eq!(review_context_per_file_budget(1600), 533);
+        assert_eq!(review_context_per_file_budget(100), 100);
+    }
+
+    #[test]
+    fn review_context_analysis_summary_avoids_full_nested_payload() {
+        let analysis = json!({
+            "base": "HEAD~1",
+            "risk": "medium",
+            "risk_score": 12.0,
+            "mapping_precision": "line",
+            "changed_files": ["a.rs", "b.rs"],
+            "changed_symbol_total": 3,
+            "impacted_total": 5,
+            "affected_flows": {"total": 1, "hits": [{"large": true}]},
+            "test_coverage": {
+                "covered_count": 1,
+                "missing_count": 2,
+                "total_symbols": 3,
+                "coverage_ratio": 0.33,
+                "missing": [{"large": true}]
+            },
+            "suggested_next_tools": ["review_context"],
+            "changed_nodes": [{"large": true}],
+        });
+
+        let summary = review_context_analysis_summary(&analysis);
+        assert_eq!(summary["changed_file_count"], 2);
+        assert!(summary.get("changed_nodes").is_none());
+        assert!(summary["test_coverage"].get("missing").is_none());
+        assert_eq!(summary["full_analysis_tool"], "detect_changes");
+    }
+
+    #[test]
+    fn graph_heuristics_filter_noisy_symbols() {
+        let call = Node::new(NodeKind::Function, "call::new");
+        assert!(!is_rankable_node(&call));
+        assert!(!is_actionable_unresolved_call(&call, 12));
+
+        let file = Node::new(NodeKind::File, "file::src/lib.rs");
+        assert!(!is_rankable_node(&file));
+
+        let domain_call = Node::new(NodeKind::Function, "call::resolve_call_placeholders");
+        assert!(is_actionable_unresolved_call(&domain_call, 2));
+
+        let test = Node::new(NodeKind::Function, "file::src/lib.rs::tests::does_it");
+        assert!(is_test_like_node(&test));
     }
 }

@@ -57,7 +57,7 @@ The cold path is SQLite (`rusqlite` with the `bundled` feature). The schema is f
 
 - `nodes(id, kind, name, qualified_name UNIQUE, source_uri, line_start, line_end, properties JSON, valid_from, valid_to)`
 - `edges(id, src_id, dst_id, kind, confidence REAL, conf_class, properties JSON, valid_from, valid_to)`
-- `embeddings(node_id PRIMARY KEY, model, vector BLOB)` — populated by a Phase 2 embedding pass; `sqlite-vec` is the planned backend for cosine search.
+- `embeddings(node_id PRIMARY KEY, model, vector BLOB)` — populated by the local `ariadne-hash-v2` embedding pass today; `sqlite-vec` remains a natural backend if the vector search surface grows.
 - `meta(key, value)` — schema version and other singletons.
 
 WAL mode and `synchronous=NORMAL` give durable writes without daemon overhead. The whole graph fits in a single file you can `scp` and re-open anywhere.
@@ -111,7 +111,7 @@ All commands accept `--db <path>` (default `ariadne.db`).
 
 **Phase 1 (this MVP)** — AST extraction (Rust, Python), petgraph store, SQLite persistence, the CLI, working `paths` / `pagerank` / greedy communities.
 
-**Phase 2** — Markdown + LaTeX done properly, embeddings (`fastembed` or external API) populating `embeddings`, full Louvain, `differential` queries on the temporal columns, `rmcp`-based MCP server exposing the kernel.
+**Phase 2** — Markdown + LaTeX done properly, optional transformer embeddings (`fastembed` or external API), full Louvain, deeper `differential` queries on the temporal columns, and richer MCP resources around the kernel.
 
 **Phase 3** — Leiden and Infomap, VF2 motif matching with a typed pattern DSL, counterfactual queries with graph cloning, `explain(path)` that walks a path and synthesises a natural-language trace from node properties.
 

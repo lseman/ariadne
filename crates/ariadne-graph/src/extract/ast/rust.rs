@@ -14,9 +14,9 @@
 //! - `Imports` from file → module (one per `use` path)
 //! - `Implements` from impl → trait (best-effort)
 
-use anyhow::Result;
 use crate::core::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
 use crate::extract::test_detect::{is_test_file_path, is_test_name};
+use anyhow::Result;
 use std::fs;
 use std::path::Path;
 use tree_sitter::{Parser, Query, QueryCursor};
@@ -339,7 +339,9 @@ fn emit_macro_calls(
                 if kids[i].kind() != "identifier" {
                     continue;
                 }
-                let Some(next) = kids.get(i + 1) else { continue };
+                let Some(next) = kids.get(i + 1) else {
+                    continue;
+                };
                 if next.kind() != "token_tree" {
                     continue;
                 }
@@ -386,6 +388,9 @@ fn emit_macro_calls(
 }
 
 fn add_ambiguous_call(graph: &mut Graph, caller: NodeId, name: &str) {
+    if crate::extract::should_suppress_call_placeholder(name) {
+        return;
+    }
     let callee_qn = format!("call::{}", name);
     let callee_id = graph.add_node(Node::new(NodeKind::Function, &callee_qn));
     graph.add_edge(caller, callee_id, Edge::ambiguous(EdgeKind::Calls));

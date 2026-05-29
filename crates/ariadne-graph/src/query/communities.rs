@@ -31,9 +31,23 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// - Communities too coarse / "everything in one blob"? Raise `resolution`
 ///   (e.g. 1.5) and/or raise `well_connectedness` (e.g. 1.5).
 /// - Want determinism / smaller diffs across runs? Set `parallel = false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommunityObjective {
+    /// Standard modularity with a null model.
+    Modularity,
+    /// Constant Potts Model (CPM) objective with a size penalty.
+    Cpm,
+}
+
+impl Default for CommunityObjective {
+    fn default() -> Self {
+        CommunityObjective::Modularity
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct CommunityOptions {
-    /// Modularity resolution γ. Larger values prefer many small
+    /// Modularity/CPM resolution γ. Larger values prefer many small
     /// communities, smaller values prefer few large ones.
     pub resolution: f32,
     /// Max sweeps per level during local-move.
@@ -46,7 +60,7 @@ pub struct CommunityOptions {
     /// to vanilla connectivity enforcement); larger values are stricter
     /// and split more aggressively.
     pub well_connectedness: f32,
-    /// Minimum modularity gain to accept a move. The original Louvain
+    /// Minimum quality gain to accept a move. The original Louvain
     /// paper uses `0`; a small positive value (e.g. `1e-7`) suppresses
     /// floating-point noise without changing the partition quality.
     pub min_modularity_gain: f32,
@@ -54,6 +68,22 @@ pub struct CommunityOptions {
     /// aggregation. Local-move stays sequential to preserve Louvain
     /// semantics.
     pub parallel: bool,
+    /// Objective used for evaluating community moves.
+    pub objective: CommunityObjective,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommunityQuality {
+    pub community_count: usize,
+    pub singleton_count: usize,
+    pub min_size: usize,
+    pub max_size: usize,
+    pub mean_size: f32,
+    pub objective: CommunityObjective,
+    pub score: f32,
+    pub disconnected_communities: usize,
+    pub mean_conductance: f32,
+    pub max_conductance: f32,
 }
 
 impl Default for CommunityOptions {
@@ -65,6 +95,7 @@ impl Default for CommunityOptions {
             well_connectedness: 1.0,
             min_modularity_gain: 1e-7,
             parallel: true,
+            objective: CommunityObjective::default(),
         }
     }
 }
@@ -95,6 +126,138 @@ pub fn leiden_with_options(graph: &Graph, options: CommunityOptions) -> HashMap<
     relabel(final_labels)
 }
 
+pub fn community_quality(
+    graph: &Graph,
+    communities: &HashMap<NodeId, usize>,
+    options: CommunityOptions,
+) -> CommunityQuality {
+    let working = WorkingGraph::from_graph(graph);
+    if working.len() == 0 || communities.is_empty() || working.total_weight <= 0.0 {
+        return CommunityQuality {
+            community_count: 0,
+            singleton_count: 0,
+            min_size: 0,
+            max_size: 0,
+            mean_size: 0.0,
+            objective: options.objective,
+            score: 0.0,
+            disconnected_communities: 0,
+            mean_conductance: 0.0,
+            max_conductance: 0.0,
+        };
+    }
+
+    let mut labels = vec![usize::MAX; working.len()];
+    for (idx, members) in working.members.iter().enumerate() {
+        if let Some(node) = members.first() {
+            if let Some(label) = communities.get(node) {
+                labels[idx] = *label;
+            }
+        }
+    }
+
+    let mut by_comm: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (idx, &label) in labels.iter().enumerate() {
+        if label != usize::MAX {
+            by_comm.entry(label).or_default().push(idx);
+        }
+    }
+
+    let community_count = by_comm.len();
+    let sizes: Vec<usize> = by_comm.values().map(Vec::len).collect();
+    let singleton_count = sizes.iter().filter(|&&size| size == 1).count();
+    let min_size = sizes.iter().copied().min().unwrap_or(0);
+    let max_size = sizes.iter().copied().max().unwrap_or(0);
+    let mean_size = if sizes.is_empty() {
+        0.0
+    } else {
+        sizes.iter().sum::<usize>() as f32 / sizes.len() as f32
+    };
+
+    let two_m = 2.0 * working.total_weight;
+    let mut degree_by_comm: HashMap<usize, f32> = HashMap::new();
+    let mut internal_twice_by_comm: HashMap<usize, f32> = HashMap::new();
+    let mut cut_by_comm: HashMap<usize, f32> = HashMap::new();
+    for u in 0..working.len() {
+        let cu = labels[u];
+        if cu == usize::MAX {
+            continue;
+        }
+        *degree_by_comm.entry(cu).or_insert(0.0) += working.degree[u];
+        *internal_twice_by_comm.entry(cu).or_insert(0.0) += 2.0 * working.self_loop[u];
+        for &(v, weight) in &working.adj[u] {
+            if labels[v] == cu {
+                *internal_twice_by_comm.entry(cu).or_insert(0.0) += weight;
+            } else {
+                *cut_by_comm.entry(cu).or_insert(0.0) += weight;
+            }
+        }
+    }
+
+    let score = if options.objective == CommunityObjective::Cpm {
+        degree_by_comm
+            .iter()
+            .map(|(&community, &_degree)| {
+                let internal_twice = internal_twice_by_comm
+                    .get(&community)
+                    .copied()
+                    .unwrap_or(0.0);
+                let size = by_comm
+                    .get(&community)
+                    .map(|members| members.len() as f32)
+                    .unwrap_or(0.0);
+                internal_twice / 2.0 - options.resolution * size * (size - 1.0) / 2.0
+            })
+            .sum()
+    } else {
+        degree_by_comm
+            .iter()
+            .map(|(&community, &degree)| {
+                let internal_twice = internal_twice_by_comm
+                    .get(&community)
+                    .copied()
+                    .unwrap_or(0.0);
+                internal_twice / two_m - options.resolution * (degree / two_m).powi(2)
+            })
+            .sum()
+    };
+
+    let disconnected_communities = by_comm
+        .values()
+        .filter(|members| induced_component_count(&working, members) > 1)
+        .count();
+
+    let conductances: Vec<f32> = degree_by_comm
+        .iter()
+        .filter_map(|(&community, &volume)| {
+            let denom = volume.min(two_m - volume);
+            if denom <= 0.0 {
+                return None;
+            }
+            Some(cut_by_comm.get(&community).copied().unwrap_or(0.0) / denom)
+        })
+        .collect();
+    let mean_conductance = if conductances.is_empty() {
+        0.0
+    } else {
+        conductances.iter().sum::<f32>() / conductances.len() as f32
+    };
+    let max_conductance = conductances.into_iter().fold(0.0_f32, f32::max);
+
+    CommunityQuality {
+        community_count,
+        singleton_count,
+        min_size,
+        max_size,
+        mean_size,
+        objective: options.objective,
+        score,
+        disconnected_communities,
+        mean_conductance,
+        max_conductance,
+    }
+}
+
 /// A weighted undirected graph used during community detection. After
 /// aggregation, each "node" represents a community from the previous level
 /// but the same operations apply uniformly.
@@ -116,7 +279,8 @@ struct WorkingGraph {
 impl WorkingGraph {
     fn from_graph(graph: &Graph) -> Self {
         let nodes: Vec<NodeId> = graph.nodes().map(|(id, _)| id).collect();
-        let index: HashMap<NodeId, usize> = nodes.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let index: HashMap<NodeId, usize> =
+            nodes.iter().enumerate().map(|(i, &id)| (id, i)).collect();
         let n = nodes.len();
         let mut adj_map: Vec<HashMap<usize, f32>> = vec![HashMap::new(); n];
         let mut self_loop = vec![0.0f32; n];
@@ -236,6 +400,11 @@ fn local_move(working: &WorkingGraph, options: CommunityOptions) -> Vec<usize> {
     let n = working.len();
     let mut comm: Vec<usize> = (0..n).collect();
     let mut comm_degree: Vec<f32> = working.degree.clone();
+    let mut comm_size: Vec<f32> = working
+        .members
+        .iter()
+        .map(|members| members.len() as f32)
+        .collect();
     let two_m = 2.0 * working.total_weight;
     if two_m <= 0.0 {
         return comm;
@@ -249,9 +418,11 @@ fn local_move(working: &WorkingGraph, options: CommunityOptions) -> Vec<usize> {
             if node_degree == 0.0 {
                 continue;
             }
+            let node_mass = working.members[u].len() as f32;
 
             // Remove u from its current community for the gain calculation.
             comm_degree[current] -= node_degree;
+            comm_size[current] -= node_mass;
 
             // Sum edge weights from u into each neighbouring community.
             let mut weight_to_comm: HashMap<usize, f32> = HashMap::new();
@@ -264,8 +435,11 @@ fn local_move(working: &WorkingGraph, options: CommunityOptions) -> Vec<usize> {
             // Always allow staying put: the baseline gain is the weight u
             // already has into its own (now u-less) community.
             let stay_weight = weight_to_comm.get(&current).copied().unwrap_or(0.0);
-            let stay_gain = stay_weight
-                - options.resolution * node_degree * comm_degree[current] / two_m;
+            let stay_gain = if options.objective == CommunityObjective::Cpm {
+                stay_weight - options.resolution * node_mass * comm_size[current]
+            } else {
+                stay_weight - options.resolution * node_degree * comm_degree[current] / two_m
+            };
             if stay_gain > best_gain {
                 best_gain = stay_gain;
                 best = current;
@@ -274,8 +448,11 @@ fn local_move(working: &WorkingGraph, options: CommunityOptions) -> Vec<usize> {
                 if candidate == current {
                     continue;
                 }
-                let gain = edge_weight
-                    - options.resolution * node_degree * comm_degree[candidate] / two_m;
+                let gain = if options.objective == CommunityObjective::Cpm {
+                    edge_weight - options.resolution * node_mass * comm_size[candidate]
+                } else {
+                    edge_weight - options.resolution * node_degree * comm_degree[candidate] / two_m
+                };
                 if gain > best_gain {
                     best_gain = gain;
                     best = candidate;
@@ -284,6 +461,7 @@ fn local_move(working: &WorkingGraph, options: CommunityOptions) -> Vec<usize> {
 
             comm[u] = best;
             comm_degree[best] += node_degree;
+            comm_size[best] += node_mass;
             if best != current {
                 moved = true;
             }
@@ -371,16 +549,23 @@ fn refinement_phase(
             .enumerate()
             .map(|(i, &u)| (base + i, working.degree[u]))
             .collect();
+        let mut local_size: HashMap<usize, f32> = members
+            .iter()
+            .enumerate()
+            .map(|(i, &u)| (base + i, working.members[u].len() as f32))
+            .collect();
 
         for _ in 0..options.max_passes {
             let mut moved = false;
             for &u in members {
                 let current = refined[&u];
                 let node_degree = working.degree[u];
+                let node_mass = working.members[u].len() as f32;
                 if node_degree == 0.0 {
                     continue;
                 }
                 *local_degree.get_mut(&current).unwrap() -= node_degree;
+                *local_size.get_mut(&current).unwrap() -= node_mass;
 
                 let mut weight_to_comm: HashMap<usize, f32> = HashMap::new();
                 for &(v, w) in &working.adj[u] {
@@ -394,8 +579,12 @@ fn refinement_phase(
                 let mut best_gain = options.min_modularity_gain;
                 let stay_weight = weight_to_comm.get(&current).copied().unwrap_or(0.0);
                 let stay_deg = local_degree.get(&current).copied().unwrap_or(0.0);
-                let stay_gain = stay_weight
-                    - options.resolution * node_degree * stay_deg / two_m;
+                let stay_size = local_size.get(&current).copied().unwrap_or(0.0);
+                let stay_gain = if options.objective == CommunityObjective::Cpm {
+                    stay_weight - options.resolution * node_mass * stay_size
+                } else {
+                    stay_weight - options.resolution * node_degree * stay_deg / two_m
+                };
                 if stay_gain > best_gain {
                     best_gain = stay_gain;
                     best = current;
@@ -405,18 +594,25 @@ fn refinement_phase(
                         continue;
                     }
                     let cand_deg = local_degree.get(&candidate).copied().unwrap_or(0.0);
-                    // Well-connectedness gate. Scaled by the user knob so
-                    // the strictness is tunable; 0 disables the gate.
-                    let threshold = options.well_connectedness
-                        * options.resolution
-                        * cand_deg
-                        * (parent_total - cand_deg)
-                        / (two_m * parent_total.max(1e-9));
+                    let cand_size = local_size.get(&candidate).copied().unwrap_or(0.0);
+                    let threshold = if options.objective == CommunityObjective::Cpm {
+                        options.well_connectedness * options.resolution * node_mass * cand_size
+                            / parent_total.max(1e-9)
+                    } else {
+                        options.well_connectedness
+                            * options.resolution
+                            * cand_deg
+                            * (parent_total - cand_deg)
+                            / (two_m * parent_total.max(1e-9))
+                    };
                     if edge_weight < threshold {
                         continue;
                     }
-                    let gain = edge_weight
-                        - options.resolution * node_degree * cand_deg / two_m;
+                    let gain = if options.objective == CommunityObjective::Cpm {
+                        edge_weight - options.resolution * node_mass * cand_size
+                    } else {
+                        edge_weight - options.resolution * node_degree * cand_deg / two_m
+                    };
                     if gain > best_gain {
                         best_gain = gain;
                         best = candidate;
@@ -425,6 +621,7 @@ fn refinement_phase(
 
                 refined.insert(u, best);
                 *local_degree.entry(best).or_insert(0.0) += node_degree;
+                *local_size.entry(best).or_insert(0.0) += node_mass;
                 if best != current {
                     moved = true;
                 }
@@ -441,7 +638,10 @@ fn refinement_phase(
     // its own node-set, so there is zero cross-parent contention: this is
     // safe for rayon without any locking.
     let per_parent_labels: Vec<Vec<usize>> = if options.parallel {
-        (0..parents.len()).into_par_iter().map(refine_parent).collect()
+        (0..parents.len())
+            .into_par_iter()
+            .map(refine_parent)
+            .collect()
     } else {
         (0..parents.len()).map(refine_parent).collect()
     };
@@ -508,6 +708,28 @@ fn enforce_connected(working: &WorkingGraph, labels: &mut [usize]) {
             labels[u] = l;
         }
     }
+}
+
+fn induced_component_count(working: &WorkingGraph, members: &[usize]) -> usize {
+    if members.is_empty() {
+        return 0;
+    }
+    let member_set: HashSet<usize> = members.iter().copied().collect();
+    let mut unseen = member_set.clone();
+    let mut components = 0usize;
+    while let Some(&start) = unseen.iter().next() {
+        components += 1;
+        let mut queue = VecDeque::from([start]);
+        unseen.remove(&start);
+        while let Some(u) = queue.pop_front() {
+            for &(v, _) in &working.adj[u] {
+                if member_set.contains(&v) && unseen.remove(&v) {
+                    queue.push_back(v);
+                }
+            }
+        }
+    }
+    components
 }
 
 fn densify(labels: &[usize]) -> Vec<usize> {
@@ -681,6 +903,36 @@ mod tests {
     }
 
     #[test]
+    fn community_quality_reports_connectedness_and_modularity() {
+        let mut g = Graph::new();
+        let a = g.add_node(Node::new(NodeKind::Function, "a"));
+        let b = g.add_node(Node::new(NodeKind::Function, "b"));
+        let c = g.add_node(Node::new(NodeKind::Function, "c"));
+        let d = g.add_node(Node::new(NodeKind::Function, "d"));
+        g.add_edge(a, b, Edge::extracted(EdgeKind::Calls));
+        g.add_edge(b, a, Edge::extracted(EdgeKind::Calls));
+        g.add_edge(c, d, Edge::extracted(EdgeKind::Calls));
+        g.add_edge(d, c, Edge::extracted(EdgeKind::Calls));
+
+        let comm = leiden(&g);
+        let quality = community_quality(
+            &g,
+            &comm,
+            CommunityOptions {
+                resolution: 1.0,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(quality.community_count, 2);
+        assert_eq!(quality.disconnected_communities, 0);
+        assert_eq!(quality.min_size, 2);
+        assert_eq!(quality.max_size, 2);
+        assert!(quality.score > 0.0);
+        assert_eq!(quality.max_conductance, 0.0);
+    }
+
+    #[test]
     fn leiden_parallel_matches_sequential() {
         // Build a moderate graph with several disjoint clusters joined by
         // weak bridges, so the refinement phase has multiple parents to
@@ -702,8 +954,14 @@ mod tests {
         g.add_edge(nodes[9], nodes[10], Edge::extracted(EdgeKind::Calls));
         g.add_edge(nodes[19], nodes[20], Edge::extracted(EdgeKind::Calls));
 
-        let opts_seq = CommunityOptions { parallel: false, ..Default::default() };
-        let opts_par = CommunityOptions { parallel: true, ..Default::default() };
+        let opts_seq = CommunityOptions {
+            parallel: false,
+            ..Default::default()
+        };
+        let opts_par = CommunityOptions {
+            parallel: true,
+            ..Default::default()
+        };
 
         let seq = leiden_with_options(&g, opts_seq);
         let par = leiden_with_options(&g, opts_par);

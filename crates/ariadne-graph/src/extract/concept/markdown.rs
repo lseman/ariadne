@@ -10,8 +10,8 @@
 //! reference-style links, and run an embedding-based concept extractor
 //! over paragraph text — left as a Phase 2 TODO.
 
-use anyhow::Result;
 use crate::core::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
+use anyhow::Result;
 use std::fs;
 use std::path::Path;
 

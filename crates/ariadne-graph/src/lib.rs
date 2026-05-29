@@ -14,6 +14,4 @@ pub mod query;
 pub mod store;
 pub mod tui;
 
-pub use crate::core::{
-    Confidence, Edge, EdgeId, EdgeKind, Graph, Node, NodeId, NodeKind,
-};
+pub use crate::core::{Confidence, Edge, EdgeId, EdgeKind, Graph, Node, NodeId, NodeKind};

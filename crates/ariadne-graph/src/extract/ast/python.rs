@@ -4,9 +4,10 @@
 //! `A.__init__` and `B.__init__` remain distinct. It emits class,
 //! function, method, import, inheritance, and call edges.
 
-use anyhow::Result;
 use crate::core::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
+use crate::extract::should_suppress_call_placeholder;
 use crate::extract::test_detect::{is_test_file_path, is_test_name};
+use anyhow::Result;
 use std::fs;
 use std::path::Path;
 use tree_sitter::{Parser, Query, QueryCursor};
@@ -213,6 +214,9 @@ fn emit_calls(node: tree_sitter::Node, source: &str, graph: &mut Graph, caller: 
         if n.kind() == "call" {
             if let Some(func_node) = n.child_by_field_name("function") {
                 if let Some(name) = call_target_name(func_node, source) {
+                    if should_suppress_call_placeholder(&name) {
+                        continue;
+                    }
                     let callee_id =
                         graph.add_node(Node::new(NodeKind::Function, format!("call::{}", name)));
                     graph.add_edge(caller, callee_id, Edge::ambiguous(EdgeKind::Calls));
