@@ -32,18 +32,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 ///   (e.g. 1.5) and/or raise `well_connectedness` (e.g. 1.5).
 /// - Want determinism / smaller diffs across runs? Set `parallel = false`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum CommunityObjective {
     /// Standard modularity with a null model.
+    #[default]
     Modularity,
     /// Constant Potts Model (CPM) objective with a size penalty.
     Cpm,
 }
 
-impl Default for CommunityObjective {
-    fn default() -> Self {
-        CommunityObjective::Modularity
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct CommunityOptions {
@@ -509,8 +506,8 @@ fn refinement_phase(
     // Total weight inside each parent community, used to anchor the
     // Leiden well-connectedness threshold.
     let mut parent_degree: HashMap<usize, f32> = HashMap::new();
-    for u in 0..n {
-        *parent_degree.entry(partition[u]).or_insert(0.0) += working.degree[u];
+    for (u, &c) in partition.iter().enumerate() {
+        *parent_degree.entry(c).or_insert(0.0) += working.degree[u];
     }
 
     // Pre-allocate a disjoint label range per parent so each parent task

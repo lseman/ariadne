@@ -269,10 +269,77 @@ fn articulation_dfs(
     }
 }
 
+/// Call-resolution coverage: how many `Calls` edges land on real
+/// definitions versus unresolved `call::*` placeholders.
+///
+/// This is the single number that tells you whether the graph's
+/// reachability-based queries (paths, impact, flows, counterfactual) can
+/// be trusted. A low rate means many call sites dead-end at placeholders.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CallResolution {
+    pub resolved: usize,
+    pub unresolved: usize,
+}
+
+impl CallResolution {
+    pub fn total(&self) -> usize {
+        self.resolved + self.unresolved
+    }
+
+    /// Fraction of call edges that reach a real definition, in `[0, 1]`.
+    /// Returns 1.0 when there are no call edges at all.
+    pub fn rate(&self) -> f32 {
+        let total = self.total();
+        if total == 0 {
+            return 1.0;
+        }
+        self.resolved as f32 / total as f32
+    }
+}
+
+pub fn call_resolution_stats(graph: &Graph) -> CallResolution {
+    use crate::core::EdgeKind;
+    let mut resolved = 0;
+    let mut unresolved = 0;
+    for (_, _, dst, edge) in graph.edges() {
+        if edge.kind != EdgeKind::Calls {
+            continue;
+        }
+        let is_placeholder = graph
+            .node(dst)
+            .map(|n| n.qualified_name.starts_with("call::"))
+            .unwrap_or(false);
+        if is_placeholder {
+            unresolved += 1;
+        } else {
+            resolved += 1;
+        }
+    }
+    CallResolution {
+        resolved,
+        unresolved,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{Edge, EdgeKind, Node, NodeKind};
+
+    #[test]
+    fn call_resolution_counts_placeholders() {
+        let mut g = Graph::new();
+        let caller = g.add_node(Node::new(NodeKind::Function, "caller"));
+        let real = g.add_node(Node::new(NodeKind::Function, "real"));
+        let placeholder = g.add_node(Node::new(NodeKind::Function, "call::external"));
+        g.add_edge(caller, real, Edge::extracted(EdgeKind::Calls));
+        g.add_edge(caller, placeholder, Edge::ambiguous(EdgeKind::Calls));
+
+        let stats = call_resolution_stats(&g);
+        assert_eq!(stats.resolved, 1);
+        assert_eq!(stats.unresolved, 1);
+        assert_eq!(stats.rate(), 0.5);
+    }
 
     #[test]
     fn finds_cycle_and_articulation() {

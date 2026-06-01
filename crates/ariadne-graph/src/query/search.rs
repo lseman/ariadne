@@ -421,173 +421,6 @@ fn query_kind_boosts(query: &str) -> Vec<(NodeKind, f32)> {
     boosts
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::{Edge, EdgeKind, Node};
-    use crate::store::{Store, DEFAULT_EMBEDDING_MODEL};
-
-    #[test]
-    fn ranked_search_prefers_exact_symbols() {
-        let mut g = Graph::new();
-        let file = g.add_node(Node::new(NodeKind::File, "file::src/lib.rs"));
-        let f = g.add_node(Node::new(
-            NodeKind::Function,
-            "file::src/lib.rs::extract_directory",
-        ));
-        g.add_edge(file, f, Edge::extracted(EdgeKind::Defines));
-        let hits = ranked_search(&g, "extract_directory", 10);
-        assert_eq!(hits[0].id, f);
-    }
-
-    #[test]
-    fn fuzzy_search_handles_typos_camel_case_and_acronyms() {
-        let mut g = Graph::new();
-        let a = g.add_node(Node::new(NodeKind::Function, "pkg::extract_directory"));
-        let b = g.add_node(Node::new(NodeKind::Function, "pkg::HTTPRequestParser"));
-        let c = g.add_node(Node::new(NodeKind::Function, "pkg::ranked_search"));
-
-        assert_eq!(ranked_search(&g, "extractDirectory", 10)[0].id, a);
-        assert_eq!(ranked_search(&g, "http parser", 10)[0].id, b);
-        assert_eq!(ranked_search(&g, "rnked serch", 10)[0].id, c);
-    }
-
-    #[test]
-    fn search_normalization_preserves_unicode_identifiers() {
-        let mut g = Graph::new();
-        let cafe = g.add_node(Node::new(NodeKind::Function, "pkg::CaféParser"));
-        let greek = g.add_node(Node::new(NodeKind::Function, "pkg::ΔιαδρομήParser"));
-
-        assert_eq!(ranked_search(&g, "café parser", 10)[0].id, cafe);
-        assert_eq!(ranked_search(&g, "διαδρομή parser", 10)[0].id, greek);
-        assert_eq!(
-            normalize_identifier("CaféParser Δelta42"),
-            "café parser δelta 42"
-        );
-    }
-
-    #[test]
-    fn levenshtein_fast_path_matches_known_distances() {
-        assert_eq!(levenshtein("", ""), 0);
-        assert_eq!(levenshtein("", "abc"), 3);
-        assert_eq!(levenshtein("abc", ""), 3);
-        assert_eq!(levenshtein("kitten", "sitting"), 3);
-        assert_eq!(levenshtein("extract_directory", "extract_dirctory"), 1);
-        assert_eq!(levenshtein("HTTPRequestParser", "HTTPParser"), 7);
-        assert_eq!(
-            levenshtein(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2",
-            ),
-            1
-        );
-        assert_eq!(levenshtein("cafe", "café"), 1);
-    }
-
-    #[test]
-    fn partial_ratio_scores_ascii_windows_without_allocating_strings() {
-        assert_eq!(
-            partial_ratio("rankedsearch", "prefixrankedsearchsuffix"),
-            1.0
-        );
-        assert!(partial_ratio("rnkedserch", "rankedsearch") >= 0.8);
-    }
-
-    #[test]
-    fn hybrid_search_uses_semantic_embeddings_when_present() {
-        let mut g = Graph::new();
-        let remove = g.add_node(Node::new(NodeKind::Function, "pkg::remove_sources"));
-        g.add_node(Node::new(NodeKind::Function, "pkg::build_graph"));
-
-        let mut store = Store::open_in_memory().unwrap();
-        store.save(&g).unwrap();
-        store.rebuild_embeddings(DEFAULT_EMBEDDING_MODEL).unwrap();
-
-        let hits = fts_ranked_search(&store, &g, "delete source", 5);
-        assert_eq!(hits[0].id, remove);
-        assert!(hits[0].signals.contains(&"semantic"));
-    }
-
-    #[test]
-    fn fts_search_applies_query_kind_boosts() {
-        let mut g = Graph::new();
-        let class = g.add_node(Node::new(NodeKind::Class, "pkg::UserService"));
-        g.add_node(Node::new(NodeKind::Function, "pkg::user_service"));
-        let function = g.add_node(Node::new(NodeKind::Function, "pkg::get_users"));
-        g.add_node(Node::new(NodeKind::Class, "pkg::GetUsers"));
-
-        let mut store = Store::open_in_memory().unwrap();
-        store.save(&g).unwrap();
-
-        let class_hits = fts_ranked_search(&store, &g, "UserService", 10);
-        assert_eq!(class_hits[0].id, class);
-        assert!(class_hits[0].signals.contains(&"kind_boost"));
-
-        let function_hits = fts_ranked_search(&store, &g, "get_users", 10);
-        assert_eq!(function_hits[0].id, function);
-        assert!(function_hits[0].signals.contains(&"kind_boost"));
-    }
-
-    #[test]
-    fn hybrid_search_boosts_symbol_definitions() {
-        let mut g = Graph::new();
-        let class = g.add_node(Node::new(NodeKind::Class, "pkg::UserService").with_source(
-            "src/user_service.rs",
-            1,
-            5,
-        ));
-        g.add_node(
-            Node::new(NodeKind::Variable, "pkg::uses_UserService").with_source("src/main.rs", 8, 9),
-        );
-
-        let mut store = Store::open_in_memory().unwrap();
-        store.save(&g).unwrap();
-
-        let hits = fts_ranked_search(&store, &g, "UserService", 10);
-        assert_eq!(hits[0].id, class);
-        assert!(hits[0].signals.contains(&"definition_boost"));
-    }
-
-    #[test]
-    fn hybrid_search_penalizes_call_placeholders() {
-        let mut g = Graph::new();
-        let real = g.add_node(
-            Node::new(NodeKind::Function, "pkg::save_model").with_source("src/model.rs", 1, 5),
-        );
-        let placeholder = g.add_node(Node::new(NodeKind::Function, "call::save_model"));
-
-        let mut store = Store::open_in_memory().unwrap();
-        store.save(&g).unwrap();
-
-        let hits = fts_ranked_search(&store, &g, "save_model", 10);
-        assert_eq!(hits[0].id, real);
-        let placeholder_hit = hits.iter().find(|hit| hit.id == placeholder).unwrap();
-        assert!(placeholder_hit.signals.contains(&"placeholder_penalty"));
-        assert!(!placeholder_hit.signals.contains(&"definition_boost"));
-    }
-
-    #[test]
-    fn hybrid_search_boosts_coherent_files() {
-        let mut g = Graph::new();
-        let auth_a = g.add_node(
-            Node::new(NodeKind::Function, "pkg::auth_login").with_source("src/auth.rs", 1, 5),
-        );
-        g.add_node(
-            Node::new(NodeKind::Function, "pkg::auth_logout").with_source("src/auth.rs", 7, 11),
-        );
-        g.add_node(
-            Node::new(NodeKind::Function, "pkg::login_helper").with_source("src/login.rs", 1, 3),
-        );
-
-        let mut store = Store::open_in_memory().unwrap();
-        store.save(&g).unwrap();
-
-        let hits = fts_ranked_search(&store, &g, "auth", 10);
-        let auth_hit = hits.iter().find(|hit| hit.id == auth_a).unwrap();
-        assert!(auth_hit.signals.contains(&"file_coherence"));
-    }
-}
-
 /// FTS5-boosted search.
 ///
 /// Runs a SQLite FTS5 query for fast candidate retrieval, then blends the
@@ -638,7 +471,7 @@ pub fn fts_ranked_search(
     }
 
     for (rank, (qname, _)) in semantic_hits.iter().enumerate() {
-        if let Some(id) = graph.find_by_qname(&qname) {
+        if let Some(id) = graph.find_by_qname(qname) {
             let semantic_boost = reciprocal_rank_boost(rank, 2700.0);
             match merged.get_mut(&id) {
                 Some(hit) => {
@@ -843,5 +676,172 @@ fn boost_multi_hit_sources(hits: &mut HashMap<NodeId, SearchHit>, graph: &Graph)
                 hit.signals.push("file_coherence");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{Edge, EdgeKind, Node};
+    use crate::store::{Store, DEFAULT_EMBEDDING_MODEL};
+
+    #[test]
+    fn ranked_search_prefers_exact_symbols() {
+        let mut g = Graph::new();
+        let file = g.add_node(Node::new(NodeKind::File, "file::src/lib.rs"));
+        let f = g.add_node(Node::new(
+            NodeKind::Function,
+            "file::src/lib.rs::extract_directory",
+        ));
+        g.add_edge(file, f, Edge::extracted(EdgeKind::Defines));
+        let hits = ranked_search(&g, "extract_directory", 10);
+        assert_eq!(hits[0].id, f);
+    }
+
+    #[test]
+    fn fuzzy_search_handles_typos_camel_case_and_acronyms() {
+        let mut g = Graph::new();
+        let a = g.add_node(Node::new(NodeKind::Function, "pkg::extract_directory"));
+        let b = g.add_node(Node::new(NodeKind::Function, "pkg::HTTPRequestParser"));
+        let c = g.add_node(Node::new(NodeKind::Function, "pkg::ranked_search"));
+
+        assert_eq!(ranked_search(&g, "extractDirectory", 10)[0].id, a);
+        assert_eq!(ranked_search(&g, "http parser", 10)[0].id, b);
+        assert_eq!(ranked_search(&g, "rnked serch", 10)[0].id, c);
+    }
+
+    #[test]
+    fn search_normalization_preserves_unicode_identifiers() {
+        let mut g = Graph::new();
+        let cafe = g.add_node(Node::new(NodeKind::Function, "pkg::CaféParser"));
+        let greek = g.add_node(Node::new(NodeKind::Function, "pkg::ΔιαδρομήParser"));
+
+        assert_eq!(ranked_search(&g, "café parser", 10)[0].id, cafe);
+        assert_eq!(ranked_search(&g, "διαδρομή parser", 10)[0].id, greek);
+        assert_eq!(
+            normalize_identifier("CaféParser Δelta42"),
+            "café parser δelta 42"
+        );
+    }
+
+    #[test]
+    fn levenshtein_fast_path_matches_known_distances() {
+        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+        assert_eq!(levenshtein("extract_directory", "extract_dirctory"), 1);
+        assert_eq!(levenshtein("HTTPRequestParser", "HTTPParser"), 7);
+        assert_eq!(
+            levenshtein(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2",
+            ),
+            1
+        );
+        assert_eq!(levenshtein("cafe", "café"), 1);
+    }
+
+    #[test]
+    fn partial_ratio_scores_ascii_windows_without_allocating_strings() {
+        assert_eq!(
+            partial_ratio("rankedsearch", "prefixrankedsearchsuffix"),
+            1.0
+        );
+        assert!(partial_ratio("rnkedserch", "rankedsearch") >= 0.8);
+    }
+
+    #[test]
+    fn hybrid_search_uses_semantic_embeddings_when_present() {
+        let mut g = Graph::new();
+        let remove = g.add_node(Node::new(NodeKind::Function, "pkg::remove_sources"));
+        g.add_node(Node::new(NodeKind::Function, "pkg::build_graph"));
+
+        let mut store = Store::open_in_memory().unwrap();
+        store.save(&g).unwrap();
+        store.rebuild_embeddings(DEFAULT_EMBEDDING_MODEL).unwrap();
+
+        let hits = fts_ranked_search(&store, &g, "delete source", 5);
+        assert_eq!(hits[0].id, remove);
+        assert!(hits[0].signals.contains(&"semantic"));
+    }
+
+    #[test]
+    fn fts_search_applies_query_kind_boosts() {
+        let mut g = Graph::new();
+        let class = g.add_node(Node::new(NodeKind::Class, "pkg::UserService"));
+        g.add_node(Node::new(NodeKind::Function, "pkg::user_service"));
+        let function = g.add_node(Node::new(NodeKind::Function, "pkg::get_users"));
+        g.add_node(Node::new(NodeKind::Class, "pkg::GetUsers"));
+
+        let mut store = Store::open_in_memory().unwrap();
+        store.save(&g).unwrap();
+
+        let class_hits = fts_ranked_search(&store, &g, "UserService", 10);
+        assert_eq!(class_hits[0].id, class);
+        assert!(class_hits[0].signals.contains(&"kind_boost"));
+
+        let function_hits = fts_ranked_search(&store, &g, "get_users", 10);
+        assert_eq!(function_hits[0].id, function);
+        assert!(function_hits[0].signals.contains(&"kind_boost"));
+    }
+
+    #[test]
+    fn hybrid_search_boosts_symbol_definitions() {
+        let mut g = Graph::new();
+        let class = g.add_node(Node::new(NodeKind::Class, "pkg::UserService").with_source(
+            "src/user_service.rs",
+            1,
+            5,
+        ));
+        g.add_node(
+            Node::new(NodeKind::Variable, "pkg::uses_UserService").with_source("src/main.rs", 8, 9),
+        );
+
+        let mut store = Store::open_in_memory().unwrap();
+        store.save(&g).unwrap();
+
+        let hits = fts_ranked_search(&store, &g, "UserService", 10);
+        assert_eq!(hits[0].id, class);
+        assert!(hits[0].signals.contains(&"definition_boost"));
+    }
+
+    #[test]
+    fn hybrid_search_penalizes_call_placeholders() {
+        let mut g = Graph::new();
+        let real = g.add_node(
+            Node::new(NodeKind::Function, "pkg::save_model").with_source("src/model.rs", 1, 5),
+        );
+        let placeholder = g.add_node(Node::new(NodeKind::Function, "call::save_model"));
+
+        let mut store = Store::open_in_memory().unwrap();
+        store.save(&g).unwrap();
+
+        let hits = fts_ranked_search(&store, &g, "save_model", 10);
+        assert_eq!(hits[0].id, real);
+        let placeholder_hit = hits.iter().find(|hit| hit.id == placeholder).unwrap();
+        assert!(placeholder_hit.signals.contains(&"placeholder_penalty"));
+        assert!(!placeholder_hit.signals.contains(&"definition_boost"));
+    }
+
+    #[test]
+    fn hybrid_search_boosts_coherent_files() {
+        let mut g = Graph::new();
+        let auth_a = g.add_node(
+            Node::new(NodeKind::Function, "pkg::auth_login").with_source("src/auth.rs", 1, 5),
+        );
+        g.add_node(
+            Node::new(NodeKind::Function, "pkg::auth_logout").with_source("src/auth.rs", 7, 11),
+        );
+        g.add_node(
+            Node::new(NodeKind::Function, "pkg::login_helper").with_source("src/login.rs", 1, 3),
+        );
+
+        let mut store = Store::open_in_memory().unwrap();
+        store.save(&g).unwrap();
+
+        let hits = fts_ranked_search(&store, &g, "auth", 10);
+        let auth_hit = hits.iter().find(|hit| hit.id == auth_a).unwrap();
+        assert!(auth_hit.signals.contains(&"file_coherence"));
     }
 }

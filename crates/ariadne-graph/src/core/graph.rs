@@ -4,11 +4,26 @@ use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use petgraph::Direction;
 use std::collections::HashMap;
 
+/// Rebuild the by_qname index from the inner graph.
+fn rebuild_qname_index(inner: &StableDiGraph<Node, Edge>) -> HashMap<String, NodeIndex> {
+    inner
+        .node_indices()
+        .filter_map(|idx| {
+            let node = &inner[idx];
+            if node.qualified_name.is_empty() {
+                None
+            } else {
+                Some((node.qualified_name.clone(), idx))
+            }
+        })
+        .collect()
+}
+
 /// In-memory property graph backed by `petgraph::StableDiGraph`.
 ///
 /// Maintains a secondary index from `qualified_name` to node, which is
 /// what symbol-resolution queries hit first.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Graph {
     inner: StableDiGraph<Node, Edge>,
     by_qname: HashMap<String, NodeIndex>,
@@ -46,8 +61,33 @@ impl Graph {
         self.inner.node_weight_mut(NodeIndex::new(id.0 as usize))
     }
 
+    /// Rename a node by updating its qualified name and the lookup index.
+    pub fn rename_node(&mut self, id: NodeId, new_qn: &str, new_name: &str) {
+        if let Some(node) = self.inner.node_weight_mut(NodeIndex::new(id.0 as usize)) {
+            // Remove old QN from index.
+            self.by_qname.remove(&node.qualified_name);
+            node.qualified_name = new_qn.to_string();
+            node.name = new_name.to_string();
+            // Insert new QN into index.
+            self.by_qname.insert(new_qn.to_string(), NodeIndex::new(id.0 as usize));
+        }
+    }
+
     pub fn edge(&self, id: EdgeId) -> Option<&Edge> {
         self.inner.edge_weight(EdgeIndex::new(id.0 as usize))
+    }
+
+    /// Convert an EdgeId to a petgraph EdgeIndex for mutation.
+    pub fn edge_index(&self, id: EdgeId) -> Option<EdgeIndex> {
+        self.inner
+            .edge_indices()
+            .find(|ei| ei.index() == id.0 as usize)
+    }
+
+    /// Remove an edge by index. Rebuilds the qname index.
+    pub fn remove_edge(&mut self, idx: EdgeIndex) {
+        self.inner.remove_edge(idx);
+        self.by_qname = rebuild_qname_index(&self.inner);
     }
 
     pub fn edge_mut(&mut self, id: EdgeId) -> Option<&mut Edge> {

@@ -7,15 +7,14 @@
 //!    (`Defines`, `Calls`, `Imports`, …). Deterministic, parallel, no
 //!    network. Implemented in [`ast`].
 //!
-//! 2. **Concept pass** — markdown / LaTeX / PDF text is parsed and
+//! 2. **Concept pass** — markdown / LaTeX text is parsed and
 //!    cross-linked to symbols discovered in pass 1 by name. Emits
 //!    `Document`, `Section`, `Concept` nodes and `Mentions` /
-//!    `Describes` edges with `Confidence::Inferred`. Scaffolded in
+//!    `Describes` edges with `Confidence::Inferred`. Implemented in
 //!    [`concept`].
 //!
-//! 3. **Vision pass** — diagrams and bitmap images are extracted via a
-//!    vision LLM (or parsed directly when the format is text-based, e.g.
-//!    SVG / Mermaid / PlantUML). Scaffolded in [`vision`].
+//! 3. **Vision pass** — diagram formats (SVG, Mermaid, PlantUML) are
+//!    parsed directly to extract concepts. Implemented in [`vision`].
 
 pub mod ast;
 pub mod concept;

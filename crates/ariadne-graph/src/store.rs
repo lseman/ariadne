@@ -660,10 +660,8 @@ impl Store {
         let rows = stmt.query_map(params![fts_query, limit as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
         })?;
-        for row in rows {
-            if let Ok(r) = row {
-                results.push(r);
-            }
+        for r in rows.flatten() {
+            results.push(r);
         }
         Ok(results)
     }
@@ -795,6 +793,7 @@ fn embedding_source_text(
     text
 }
 
+#[allow(clippy::too_many_arguments)]
 fn node_row_from_sql(
     kind_str: String,
     qname: String,
@@ -1100,7 +1099,7 @@ fn normalize_vector(vector: &mut [f32]) {
 }
 
 fn encode_embedding(vector: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vector.len() * std::mem::size_of::<f32>());
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(vector));
     for value in vector {
         bytes.extend_from_slice(&value.to_le_bytes());
     }

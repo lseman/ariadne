@@ -1,9 +1,6 @@
-//! Pass 3: vision and diagram extraction.
+//! Pass 3: diagram extraction.
 //!
-//! Text-based diagram formats (SVG, Mermaid, PlantUML) are parsed
-//! directly. Bitmap formats (PNG, JPG, screenshots) are sent to a
-//! vision LLM — that path requires network and an API key and is
-//! scaffolded in [`llm`].
+//! Diagram formats are parsed directly — SVG text nodes become `Concept`
+//! nodes linked to a `Diagram` via `Illustrates` edges.
 
-pub mod llm;
 pub mod svg;

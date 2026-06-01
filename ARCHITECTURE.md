@@ -39,7 +39,7 @@ LaTeX is a stub. The plan: a `nom` grammar over a small subset (preamble, sectio
 
 `ariadne-extract::vision` handles diagrams. Text-based formats (SVG, Mermaid, PlantUML) parse directly with no network. SVG is implemented and registers a `Diagram` node plus one `Concept` per `<text>` label, linked by `Illustrates` edges.
 
-Bitmap formats live in `vision::llm` as a stub. When wired up, that path will:
+Bitmap formats are no longer supported.
 
 1. Hash the image bytes (sha256) and consult a local cache.
 2. On miss, POST to the Anthropic Messages API (or OpenAI Vision / Gemini) with a structured prompt asking for `(concept, related)` triples.
@@ -84,15 +84,15 @@ Why not Neo4j: single-file > daemon; ACID; trivial backup; composes with a termi
 
 `communities::louvain` is currently a single-phase greedy local-move algorithm — each node moves to the community most represented among its neighbours, iterated to a fixed point. Full multi-level Louvain (with community-aggregation phase) and Leiden (with refinement) are the next two implementations; the API stays the same.
 
-`motifs::find_motifs` will be VF2-style subgraph isomorphism (Phase 3). The most useful queries it unlocks aren't generic graph patterns but typed ones — "function that calls `untrusted_input` and later `sql_exec` without an intervening `sanitize_*` call" — which is why the pattern type carries `NodeKind` and `EdgeKind` constraints.
+`motifs::find_motifs` implements VF2-style subgraph isomorphism (Phase 3). The pattern type carries `NodeKind` and `EdgeKind` constraints. Useful queries: "function that calls `untrusted_input` and later `sql_exec` without an intervening `sanitize_*` call", "diamond inheritance patterns", "doc → concept → function triangles".
 
-`counterfactual::run_without_edges` will clone the in-memory graph, drop the supplied edges, and rerun a query (Phase 3). Answers "if I delete this function, what stops being reachable?" with reachability math rather than CRG's deliberately-conservative blast-radius approximation.
+`counterfactual::run_without_edges` clones the in-memory graph, drops the supplied edges, and reruns a query (Phase 3). Answers "if I delete this function, what stops being reachable?" with reachability math rather than CRG's deliberately-conservative blast-radius approximation.
 
 `differential` will operate directly on the SQLite store and emit `{added, removed, modified}` buckets driven by the temporal columns.
 
 ## CLI
 
-The binary is `ariadne` (from `ariadne-cli`). Eight commands are wired up today:
+The binary is `ariadne` (from `ariadne-cli`). Nine commands are wired up today:
 
 ```
 ariadne build   <path>                      Build the graph from a directory.
@@ -113,9 +113,9 @@ All commands accept `--db <path>` (default `ariadne.db`).
 
 **Phase 2** — Markdown + LaTeX done properly, optional transformer embeddings (`fastembed` or external API), full Louvain, deeper `differential` queries on the temporal columns, and richer MCP resources around the kernel.
 
-**Phase 3** — Leiden and Infomap, VF2 motif matching with a typed pattern DSL, counterfactual queries with graph cloning, `explain(path)` that walks a path and synthesises a natural-language trace from node properties.
+**Phase 3** — Leiden and Infomap, `explain(path)` that walks a path and synthesises a natural-language trace from node properties. Counterfactual queries and VF2 motif matching are implemented.
 
-**Phase 4** — Vision LLM pass for bitmap diagrams, hyperedge materialisation in the query layer, a Ratatui TUI explorer.
+**Phase 4** — Hyperedge materialisation in the query layer, a Ratatui TUI explorer.
 
 ## License
 

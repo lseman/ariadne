@@ -47,6 +47,7 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_scope(
     node: tree_sitter::Node,
     source: &str,

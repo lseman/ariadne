@@ -292,9 +292,8 @@ fn emit_calls_in_subtree(node: tree_sitter::Node, source: &str, graph: &mut Grap
         }
         if n.kind() == "call_expression" {
             if let Some(func_node) = n.child_by_field_name("function") {
-                let name = call_target_name(func_node, source);
-                if let Some(name) = name {
-                    add_ambiguous_call(graph, caller, &name);
+                if let Some((name, scope)) = call_target_name(func_node, source) {
+                    add_ambiguous_call(graph, caller, &name, scope.as_deref());
                 }
             }
         } else if n.kind() == "macro_invocation" {
@@ -376,7 +375,7 @@ fn emit_macro_calls(
                     ) {
                         continue;
                     }
-                    add_ambiguous_call(graph, caller, name_text);
+                    add_ambiguous_call(graph, caller, name_text, None);
                 }
             }
         }
@@ -387,27 +386,49 @@ fn emit_macro_calls(
     }
 }
 
-fn add_ambiguous_call(graph: &mut Graph, caller: NodeId, name: &str) {
+fn add_ambiguous_call(graph: &mut Graph, caller: NodeId, name: &str, scope: Option<&str>) {
     if crate::extract::should_suppress_call_placeholder(name) {
         return;
     }
     let callee_qn = format!("call::{}", name);
     let callee_id = graph.add_node(Node::new(NodeKind::Function, &callee_qn));
-    graph.add_edge(caller, callee_id, Edge::ambiguous(EdgeKind::Calls));
+    let mut edge = Edge::ambiguous(EdgeKind::Calls);
+    if let Some(scope) = scope {
+        // Preserve the path prefix (`module::path` from `module::path::name`)
+        // so the post-extraction resolver can disambiguate same-named
+        // candidates. Discarded otherwise.
+        edge.properties.insert(
+            "call_scope".into(),
+            serde_json::Value::String(scope.to_string()),
+        );
+    }
+    graph.add_edge(caller, callee_id, edge);
 }
 
-fn call_target_name(node: tree_sitter::Node, source: &str) -> Option<String> {
+/// Resolve a call's callee name plus an optional disambiguating scope.
+///
+/// For a path call like `module::path::name`, the trailing segment is the
+/// name and the leading segments are the scope. The scope is otherwise
+/// discarded; the resolver uses it to pick between same-named candidates
+/// when a name is not globally unique.
+fn call_target_name(node: tree_sitter::Node, source: &str) -> Option<(String, Option<String>)> {
     match node.kind() {
-        "identifier" => Some(node.utf8_text(source.as_bytes()).ok()?.to_string()),
+        "identifier" => Some((node.utf8_text(source.as_bytes()).ok()?.to_string(), None)),
         "field_expression" => {
             // foo.bar() — take `bar`
             let field = node.child_by_field_name("field")?;
-            Some(field.utf8_text(source.as_bytes()).ok()?.to_string())
+            Some((field.utf8_text(source.as_bytes()).ok()?.to_string(), None))
         }
         "scoped_identifier" | "scoped_type_identifier" => {
-            // module::path::name — take the last segment
+            // module::path::name — name is the last segment, scope the rest.
             let text = node.utf8_text(source.as_bytes()).ok()?;
-            Some(text.rsplit("::").next()?.to_string())
+            let name = text.rsplit("::").next()?.to_string();
+            let scope = text
+                .strip_suffix(&name)
+                .and_then(|s| s.strip_suffix("::"))
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            Some((name, scope))
         }
         _ => None,
     }

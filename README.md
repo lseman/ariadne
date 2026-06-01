@@ -20,7 +20,8 @@ Ariadne is designed for AI coding agents that need compact, high-signal context 
 - **Typed, weighted reasoning.** Nodes and edges carry kinds and confidence; paths, search, PageRank, communities, and impact ranking use those signals.
 - **Hybrid + semantic search.** SQLite FTS5 with a BM25-ranked, unicode61 tokeniser (underscore-aware), blended with in-memory fuzzy/topology scoring and optional local embeddings.
 - **Execution flows.** Entry-point detection and forward-BFS flow tracing, materialised as `Flow` nodes ranked by criticality. Cap trimming preserves the most central nodes rather than cutting by BFS order.
-- **Interactive TUI.** Three-tab terminal UI (Search / Flows / Browse) with live hybrid search, signal-aware search details, direct test coverage hints, callers/callees/flows panels, and cross-tab node navigation.
+- **Counterfactual reachability.** `counterfactual` drops edges and reruns BFS to answer "what breaks if I remove this dependency?" with graph-level reachability math, not conservative blast-radius approximation.
+- **Interactive TUI. Three-tab terminal UI (Search / Flows / Browse) with live hybrid search, signal-aware search details, direct test coverage hints, callers/callees/flows panels, and cross-tab node navigation.
 - **Local-first.** SQLite storage, tree-sitter extraction, and a self-contained D3 explorer. No external services required.
 
 ## What It Can Do Today
@@ -32,7 +33,7 @@ Ariadne is already useful as a local codebase map, an agent context server, and 
 | Extraction | Rust, Python, C/C++; Markdown sections and symbol mentions; SVG diagram text/concept extraction; file, symbol, import, call, inheritance, mention, flow, and test edges |
 | Search | SQLite FTS5, BM25, unicode-aware tokenisation, fuzzy identifier matching, topology signals, and optional local semantic embeddings |
 | Review | Git diff analysis, hunk-to-symbol mapping, risk scoring, blast radius, suggested review questions, token-budgeted context, affected flows, and test coverage gaps |
-| Graph reasoning | Weighted paths, callers/callees, impact ranking, traversal, PageRank, personalized PageRank, communities, bridge nodes, k-core, cycles, articulation points, surprises, and architecture summaries |
+| Graph reasoning | Weighted paths, callers/callees, impact ranking, traversal, PageRank, personalized PageRank, communities, bridge nodes, k-core, cycles, articulation points, surprises, architecture summaries, and counterfactual reachability |
 | History | Incremental updates, file hashes, active/archive rows, temporal `valid_from` / `valid_to` windows, and graph diff between git refs |
 | Interfaces | CLI, one-operation JSON tool, real stdio MCP server, legacy JSON-lines MCP loop, TUI, D3 web explorer, graph health reports, wiki export, GraphML/Cypher/Obsidian exports |
 | Automation | Polling watch mode, daemon-managed repositories, git hooks, and editor config installers for Claude Code, Cursor, VS Code, and Codex |
@@ -55,7 +56,6 @@ Ariadne is already useful as a local codebase map, an agent context server, and 
 | Markdown concept extractor | minimal |
 | LaTeX concept extractor | stub |
 | SVG diagram extractor | working |
-| Vision-LLM diagram extractor | stub |
 | SQLite persistence | working |
 | FTS5 full-text search | working — BM25, unicode61+underscore tokeniser, blended ranking |
 | Optional embeddings | working — local `ariadne-hash-v2` semantic search boost |
@@ -78,7 +78,7 @@ Ariadne is already useful as a local codebase map, an agent context server, and 
 | Editor MCP installers | working — Claude Code, Cursor, VS Code, Codex |
 | D3 graph explorer | working |
 | Performance guardrails | working — response budgets, pagination, graph summaries |
-| Motifs / counterfactuals | scaffolded |
+| Motifs / counterfactuals | counterfactual working; motifs working (VF2 subgraph isomorphism) |
 
 ## Quick Start
 
@@ -286,6 +286,8 @@ Supported operations:
 | `affected_flows` | | `base`, `limit` | Flows touched by recent changes |
 | `test_coverage` | | `target` or `base` | Direct and nearby test coverage for a target or changed symbols |
 | `graph_diff` | | `base`, `head`, `limit` | Temporal diff between graph states |
+| `counterfactual` | | `target`, `direction`, `max_depth` | Drops edges from a symbol, reruns BFS, reports reachable nodes lost |
+| `motifs` | | `pattern`, `built_in`, `limit` | VF2 subgraph pattern matching — built-in queries: `security_audit`, `diamond`, `doc_triangle` |
 | `embed_graph` | | `model` | Builds local embeddings for semantic search |
 
 ## MCP Server
@@ -426,6 +428,8 @@ All commands accept `--db path/to/ariadne.db` (default: `ariadne.db`).
 | `ariadne god-nodes` | `--top 10`, `--seed SYMBOL` | Ranks global or seed-biased PageRank nodes |
 | `ariadne communities` | `--top 20`, `--algorithm louvain|leiden`, `--objective modularity|cpm`, `--resolution 1.0`, `--well-connectedness 1.0`, `--max-passes 50`, `--max-levels 10`, `--no-parallel` | Detects graph communities and prints ranked summaries plus quality metrics |
 | `ariadne flows` | `--top 20` | Lists execution flows ranked by criticality |
+| `ariadne counterfactual <SYMBOL>` | `--direction out|in|both`, `--max-depth 5` | Drops edges from a symbol and re-runs BFS: answers "what breaks if I remove this dependency?" |
+| `ariadne motifs` | `--built-in security_audit|diamond|doc_triangle`, `--pattern FILE`, `--query JSON`, `--limit 50` | VF2 subgraph motif matching — find patterns like security-audit chains or diamond inheritance |
 
 ### Export and Agent JSON
 

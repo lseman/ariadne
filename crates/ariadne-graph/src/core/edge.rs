@@ -72,7 +72,7 @@ impl EdgeKind {
 /// Confidence tag attached to every edge.
 ///
 /// - `Extracted` — derived by deterministic AST analysis. Score = 1.0.
-/// - `Inferred(s)` — derived semantically (by an LLM, embeddings, or
+/// - `Inferred(s)` — derived semantically (by embeddings,
 ///   name-matching heuristics) with a per-edge score in `[0, 1]`.
 /// - `Ambiguous` — the extractor saw evidence but cannot commit to a
 ///   score. Surfaced for human review.

@@ -35,6 +35,7 @@ pub use impact::{analyze_impact, ImpactHit, ImpactQuery};
 pub use paths::{callees_of, callers_of, find_paths, find_top_paths, PathQuery, WeightedPath};
 pub use search::{fts_ranked_search, ranked_search, search_by_name, SearchHit};
 pub use structure::{
-    approx_betweenness, articulation_points, bridge_scores, core_numbers, cyclic_components,
-    strongly_connected_components, BridgeScore, Component, CoreNumber,
+    approx_betweenness, articulation_points, bridge_scores, call_resolution_stats, core_numbers,
+    cyclic_components, strongly_connected_components, BridgeScore, CallResolution, Component,
+    CoreNumber,
 };

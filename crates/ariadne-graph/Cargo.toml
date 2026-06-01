@@ -39,6 +39,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ratatui = { version = "0.29", features = ["crossterm"] }
 crossterm = "0.28"
+regex = { workspace = true }
+pulldown-cmark = { workspace = true }
 
 # MSRV pins for Rust 1.75 — newer transitive deps require edition2024 or 1.80+.
 # These constrain the resolver; they are not used directly in code.

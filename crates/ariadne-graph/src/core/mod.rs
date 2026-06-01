@@ -3,7 +3,7 @@
 //! The graph models source code, documentation, and diagrams as a typed
 //! property graph. Nodes have a [`NodeKind`] (`Function`, `Document`, etc.);
 //! edges carry a [`EdgeKind`] and a [`Confidence`] tag that distinguishes
-//! deterministic structural extraction from LLM-inferred semantic links.
+//! deterministic structural extraction from inferred semantic links.
 
 pub mod edge;
 pub mod graph;

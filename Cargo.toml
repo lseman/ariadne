@@ -33,6 +33,8 @@ rayon = "1"
 sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+pulldown-cmark = "0.11"
 
 [profile.release]
 lto = "thin"

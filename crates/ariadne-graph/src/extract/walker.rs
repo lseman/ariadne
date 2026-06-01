@@ -119,8 +119,9 @@ pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
         .collect();
     // Resolution outcome tag, used as a property on the new edge so we
     // can tell file-local matches from globally-unique ones during
-    // analysis.
-    let mut additions: Vec<(_, _, &'static str)> = Vec::new();
+    // analysis. A `false` confidence flag marks tiers that are inferred
+    // rather than structural, so queries can still filter them out.
+    let mut additions: Vec<(_, _, &'static str, bool)> = Vec::new();
 
     for (_, src, dst, edge) in graph.edges() {
         if edge.kind != EdgeKind::Calls {
@@ -142,7 +143,7 @@ pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
         // Tier 1: exactly one candidate in the whole graph.
         if candidates.len() == 1 {
             if !existing.contains(&(src, candidates[0])) {
-                additions.push((src, candidates[0], "unique_name"));
+                additions.push((src, candidates[0], "unique_name", true));
             }
             continue;
         }
@@ -150,28 +151,55 @@ pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
         // Tier 2: multiple candidates, but exactly one in the caller's
         // own file. Common case for per-file helpers (`scoped_qname`,
         // `walk_scope`, …) defined in several language extractors.
-        let Some(src_file) = graph.node(src).and_then(|n| n.source_uri.clone()) else {
-            continue;
-        };
-        let local: Vec<_> = candidates
-            .iter()
-            .filter(|&&cand| {
-                graph
-                    .node(cand)
-                    .and_then(|n| n.source_uri.as_ref())
-                    .map(|uri| uri == &src_file)
-                    .unwrap_or(false)
-            })
-            .copied()
-            .collect();
-        if local.len() == 1 && !existing.contains(&(src, local[0])) {
-            additions.push((src, local[0], "file_local"));
+        let src_file = graph.node(src).and_then(|n| n.source_uri.clone());
+        if let Some(src_file) = src_file.as_ref() {
+            let local: Vec<_> = candidates
+                .iter()
+                .filter(|&&cand| {
+                    graph
+                        .node(cand)
+                        .and_then(|n| n.source_uri.as_ref())
+                        .map(|uri| uri == src_file)
+                        .unwrap_or(false)
+                })
+                .copied()
+                .collect();
+            if local.len() == 1 {
+                if !existing.contains(&(src, local[0])) {
+                    additions.push((src, local[0], "file_local", true));
+                }
+                continue;
+            }
+        }
+
+        // Tier 3: a path-qualified call (`module::path::name`) carried its
+        // scope onto the placeholder edge. Prefer the unique candidate
+        // whose qualified name contains that scope. Inferred, not
+        // structural — the match is by name fragment, not full resolution.
+        if let Some(scope) = edge.properties.get("call_scope").and_then(|v| v.as_str()) {
+            let scoped: Vec<_> = candidates
+                .iter()
+                .filter(|&&cand| {
+                    graph
+                        .node(cand)
+                        .map(|n| n.qualified_name.contains(scope))
+                        .unwrap_or(false)
+                })
+                .copied()
+                .collect();
+            if scoped.len() == 1 && !existing.contains(&(src, scoped[0])) {
+                additions.push((src, scoped[0], "scoped", false));
+            }
         }
     }
 
     let count = additions.len();
-    for (src, dst, tag) in additions {
-        let mut edge = Edge::extracted(EdgeKind::Calls);
+    for (src, dst, tag, structural) in additions {
+        let mut edge = if structural {
+            Edge::extracted(EdgeKind::Calls)
+        } else {
+            Edge::inferred(EdgeKind::Calls, 0.7)
+        };
         edge.properties.insert(
             "resolved_from".into(),
             serde_json::Value::String(format!("call_placeholder::{}", tag)),
@@ -691,6 +719,71 @@ pub fn entry_b() -> u32 { shared() }
             b_calls.contains(&shared_b) && !b_calls.contains(&shared_a),
             "entry_b should call b.rs::shared, not a.rs::shared (b_calls={:?})",
             b_calls
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolver_uses_call_scope_to_disambiguate() {
+        // Two modules in one file each define `fn shared()`. A path call
+        // `beta::shared()` from a third function must resolve to
+        // `beta::shared`, not `alpha::shared`. Neither Tier 1 (name is not
+        // unique) nor Tier 2 (all three live in the same file) can pick;
+        // only the captured `call_scope` from the path resolves it.
+        let dir = std::env::temp_dir().join(format!("ariadne_scoped_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            r#"
+mod alpha { pub fn shared() -> u32 { 1 } }
+mod beta { pub fn shared() -> u32 { 2 } }
+pub fn entry() -> u32 { beta::shared() }
+"#,
+        )
+        .unwrap();
+
+        let mut graph = Graph::new();
+        extract_directory(&dir, &mut graph).unwrap();
+
+        let entry = graph
+            .nodes()
+            .find(|(_, n)| n.qualified_name.ends_with("::entry"))
+            .map(|(id, _)| id)
+            .expect("entry must be extracted");
+        let beta_shared = graph
+            .nodes()
+            .find(|(_, n)| {
+                n.qualified_name.ends_with("::beta::shared")
+                    && !n.qualified_name.starts_with("call::")
+            })
+            .map(|(id, _)| id)
+            .expect("beta::shared must be extracted");
+        let alpha_shared = graph
+            .nodes()
+            .find(|(_, n)| {
+                n.qualified_name.ends_with("::alpha::shared")
+                    && !n.qualified_name.starts_with("call::")
+            })
+            .map(|(id, _)| id)
+            .expect("alpha::shared must be extracted");
+
+        let resolved: Vec<_> = graph
+            .out_neighbors(entry)
+            .filter(|(dst, e)| {
+                e.kind == EdgeKind::Calls
+                    && graph
+                        .node(*dst)
+                        .map(|n| !n.qualified_name.starts_with("call::"))
+                        .unwrap_or(false)
+            })
+            .map(|(dst, _)| dst)
+            .collect();
+        assert!(
+            resolved.contains(&beta_shared) && !resolved.contains(&alpha_shared),
+            "scoped call beta::shared() must resolve to beta, not alpha (resolved={:?})",
+            resolved
         );
 
         std::fs::remove_dir_all(&dir).ok();
