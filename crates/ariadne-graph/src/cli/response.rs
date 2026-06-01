@@ -202,6 +202,23 @@ pub fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value
             let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
             compact_for_detail(diagnostics_json(db, limit)?, detail)
         }
+        "graph_diff" => {
+            let base = params.get("base").and_then(Value::as_str).unwrap_or("HEAD~1");
+            let head = params.get("head").and_then(Value::as_str).unwrap_or("HEAD");
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+            compact_for_detail(graph_diff_json(db, base, head, limit)?, detail)
+        }
+        "counterfactual" => {
+            let target = required_str(params, "target")?;
+            let direction = params.get("direction").and_then(Value::as_str).unwrap_or("out");
+            let max_depth = params.get("max_depth").and_then(Value::as_u64).unwrap_or(5) as usize;
+            compact_for_detail(counterfactual_json(db, target, direction, max_depth)?, detail)
+        }
+        "motifs" => {
+            let built_in = params.get("built_in").and_then(Value::as_str).unwrap_or("security_audit");
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+            compact_for_detail(motifs_json(db, built_in, limit)?, detail)
+        }
         "suggested_questions" => {
             let base = params
                 .get("base")
@@ -1172,6 +1189,138 @@ pub fn diagnostics_json(db: &Path, limit: usize) -> Result<Value> {
         },
         "warnings": warnings,
         "suggested_next_tools": ["gaps", "rebuild_fts", "embed_graph", "surprises"],
+    }))
+}
+
+/// Temporal diff between two graph snapshots, resolved from git refs.
+pub fn graph_diff_json(db: &Path, base: &str, head: &str, top: usize) -> Result<Value> {
+    let store = Store::open(db)?;
+    // Include archived rows so nodes/edges removed between base and head
+    // are still present to be diffed.
+    let graph = store.load_temporal()?;
+
+    if !graph_has_temporal_data(&graph) {
+        return Ok(json!({
+            "operation": "graph_diff",
+            "error": "graph has no temporal data; rebuild with git context (run `build` inside a git repo)",
+        }));
+    }
+    let (Some(base_hash), Some(head_hash)) = (git_commit_hash(base)?, git_commit_hash(head)?) else {
+        bail!("could not resolve git refs {base} / {head}");
+    };
+
+    let mut cache = HashMap::new();
+    let diff = temporal_diff(&graph, &base_hash, &head_hash, &mut |ancestor, descendant| {
+        *cache
+            .entry((ancestor.to_string(), descendant.to_string()))
+            .or_insert_with(|| git_is_ancestor(ancestor, descendant))
+    });
+
+    Ok(json!({
+        "operation": "graph_diff",
+        "base": base,
+        "head": head,
+        "added_nodes": nodes_json(&graph, &diff.added_nodes, top),
+        "removed_nodes": nodes_json(&graph, &diff.removed_nodes, top),
+        "added_edges": changed_edges_json(&graph, &diff.added_edges),
+        "removed_edges": changed_edges_json(&graph, &diff.removed_edges),
+    }))
+}
+
+/// Drop a symbol's edges, rerun BFS, and report nodes that become
+/// unreachable from the rest of the graph.
+pub fn counterfactual_json(
+    db: &Path,
+    symbol: &str,
+    direction: &str,
+    max_depth: usize,
+) -> Result<Value> {
+    use ariadne_graph::query::counterfactual::run_without_edges;
+
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+    let target = resolve(&graph, symbol)?;
+
+    // Edges incident to the target in the requested direction.
+    let drop: Vec<_> = graph
+        .edges()
+        .filter(|(_, src, dst, _)| match direction {
+            "in" => *dst == target,
+            "both" => *src == target || *dst == target,
+            _ => *src == target,
+        })
+        .map(|(id, _, _, _)| id)
+        .collect();
+
+    // BFS reachable set from the target, before and after the drop.
+    let reach = |g: &Graph| -> HashSet<NodeId> {
+        let mut seen = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back((target, 0usize));
+        seen.insert(target);
+        while let Some((node, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            let next: Vec<NodeId> = match direction {
+                "in" => g.in_neighbors(node).map(|(n, _)| n).collect(),
+                "both" => g
+                    .out_neighbors(node)
+                    .chain(g.in_neighbors(node))
+                    .map(|(n, _)| n)
+                    .collect(),
+                _ => g.out_neighbors(node).map(|(n, _)| n).collect(),
+            };
+            for n in next {
+                if seen.insert(n) {
+                    queue.push_back((n, depth + 1));
+                }
+            }
+        }
+        seen
+    };
+
+    let before = reach(&graph);
+    let counterfactual = run_without_edges(&graph, &drop);
+    let after = reach(&counterfactual);
+
+    let mut lost: Vec<NodeId> = before.difference(&after).copied().collect();
+    lost.sort_by_key(|id| id.0);
+
+    Ok(json!({
+        "operation": "counterfactual",
+        "target": graph.node(target).map(|n| n.qualified_name.clone()),
+        "direction": direction,
+        "dropped_edges": drop.len(),
+        "reachable_before": before.len(),
+        "reachable_after": after.len(),
+        "unreachable_count": lost.len(),
+        "now_unreachable": nodes_json(&graph, &lost, 50),
+    }))
+}
+
+/// Match a built-in subgraph motif against the graph.
+pub fn motifs_json(db: &Path, built_in: &str, limit: usize) -> Result<Value> {
+    use ariadne_graph::query::motifs::{
+        diamond_inheritance_motif, doc_function_triangle, find_motifs, security_audit_motif,
+    };
+
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+
+    let motif = match built_in {
+        "security_audit" => security_audit_motif(),
+        "diamond" => diamond_inheritance_motif(),
+        "doc_triangle" => doc_function_triangle(),
+        other => bail!("unknown built-in motif {other}; expected security_audit, diamond, or doc_triangle"),
+    };
+
+    let matches = find_motifs(&graph, &motif, limit);
+    Ok(json!({
+        "operation": "motifs",
+        "built_in": built_in,
+        "match_count": matches.len(),
+        "matches": matches,
     }))
 }
 

@@ -586,6 +586,37 @@ impl Store {
         Ok(out)
     }
 
+    /// Load a graph including archived (closed-out) rows from the version
+    /// tables, so temporal diffs can see nodes/edges that are no longer
+    /// active. Archived rows are inserted first and active rows last, so
+    /// for a qualified name present in both the active state wins — which
+    /// keeps purely-removed rows visible while preferring the live row for
+    /// rows that still exist.
+    pub fn load_temporal(&self) -> Result<Graph> {
+        let mut graph = Graph::new();
+
+        let mut nodes = self.temporal_nodes()?;
+        // Sort so archived rows (valid_to set) come before active rows.
+        nodes.sort_by_key(|r| r.node.valid_to.is_none());
+        for row in nodes {
+            graph.add_node(row.node);
+        }
+
+        let mut edges = self.temporal_edges()?;
+        edges.sort_by_key(|r| r.edge.valid_to.is_none());
+        for row in edges {
+            let (Some(src), Some(dst)) = (
+                graph.find_by_qname(&row.src_qname),
+                graph.find_by_qname(&row.dst_qname),
+            ) else {
+                continue;
+            };
+            graph.add_edge(src, dst, row.edge);
+        }
+
+        Ok(graph)
+    }
+
     pub fn delete_sources(&mut self, sources: &[String]) -> Result<()> {
         let tx = self.conn.transaction()?;
         for source in sources {
@@ -1236,6 +1267,41 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(s.fts_stats().unwrap(), 2);
         assert!(!s.fts_search("alpha", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn load_temporal_includes_archived_rows() {
+        // Save an active graph, archive one node, then confirm load()
+        // omits the archived row while load_temporal() includes it with
+        // its closing commit intact.
+        let mut g = Graph::new();
+        let mut keep = Node::new(NodeKind::Function, "m::keep");
+        keep.valid_from = Some("c1".to_string());
+        keep.source_uri = Some("src/a.rs".to_string());
+        g.add_node(keep);
+
+        let mut s = Store::open_in_memory().unwrap();
+        s.save(&g).unwrap();
+
+        let mut gone = Node::new(NodeKind::Function, "m::gone");
+        gone.valid_from = Some("c1".to_string());
+        gone.source_uri = Some("src/a.rs".to_string());
+        s.archive_nodes(&[StoredNodeRow { node: gone }], "c2").unwrap();
+
+        let active = s.load().unwrap();
+        assert!(active.find_by_qname("m::keep").is_some());
+        assert!(
+            active.find_by_qname("m::gone").is_none(),
+            "load() must not surface archived rows"
+        );
+
+        let temporal = s.load_temporal().unwrap();
+        let gone_id = temporal
+            .find_by_qname("m::gone")
+            .expect("load_temporal must surface archived rows");
+        let gone_node = temporal.node(gone_id).unwrap();
+        assert_eq!(gone_node.valid_from.as_deref(), Some("c1"));
+        assert_eq!(gone_node.valid_to.as_deref(), Some("c2"));
     }
 
     #[test]

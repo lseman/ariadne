@@ -138,12 +138,14 @@ fn call_edges_exist_between_defined_nodes() {
     let calc_new_qname = "file::/data/dev/ariadne/crates/ariadne-graph/tests/fixtures/sample.rs::Calculator::new";
     let calc_new_id = graph.find_by_qname(calc_new_qname).expect("Calculator::new not found");
 
-    // The file node should define it.
+    // The file node should define it. Pick sample.rs specifically — the
+    // walk also produces a sample.py File node, and which comes first is
+    // filesystem-order dependent.
     let file_id = graph
         .nodes()
-        .find(|(_, n)| n.kind == NodeKind::File)
+        .find(|(_, n)| n.kind == NodeKind::File && n.qualified_name.ends_with("sample.rs"))
         .map(|(id, _)| id)
-        .expect("file node not found");
+        .expect("sample.rs file node not found");
 
     assert!(
         graph.edges().any(|(_, s, d, e)| s == file_id && d == calc_new_id && e.kind == EdgeKind::Defines),

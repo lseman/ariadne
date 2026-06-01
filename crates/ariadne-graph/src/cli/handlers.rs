@@ -165,6 +165,39 @@ pub enum Commands {
         #[arg(long, default_value_t = 25)]
         top: usize,
     },
+    /// Rebuild the SQLite FTS5 node index.
+    RebuildFts,
+    /// Build lightweight local embeddings for semantic search.
+    Embed {
+        #[arg(long, default_value = "ariadne-hash-v2")]
+        model: String,
+    },
+    /// Open the interactive terminal UI.
+    Tui,
+    /// Diff graph snapshots using temporal valid_from / valid_to rows.
+    GraphDiff {
+        #[arg(long, default_value = "HEAD~1")]
+        base: String,
+        #[arg(long, default_value = "HEAD")]
+        head: String,
+        #[arg(long, default_value_t = 50)]
+        top: usize,
+    },
+    /// Drop edges from a symbol and re-run BFS: what breaks if removed?
+    Counterfactual {
+        symbol: String,
+        #[arg(long, default_value = "out")]
+        direction: String,
+        #[arg(long, default_value_t = 5)]
+        max_depth: usize,
+    },
+    /// Match subgraph motifs like security-audit chains or diamond inheritance.
+    Motifs {
+        #[arg(long, default_value = "security_audit")]
+        built_in: String,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     /// Generate prioritized review questions from graph analysis.
     SuggestedQuestions {
         #[arg(long, default_value = "HEAD~1")]
@@ -236,6 +269,32 @@ pub enum DaemonCommands {
     Status,
 }
 
+/// Stamp every node and edge that lacks a `valid_from` with the given
+/// commit SHA, marking them as introduced at that commit. Idempotent:
+/// rows that already carry a `valid_from` are left untouched.
+fn stamp_valid_from(graph: &mut Graph, commit: &str) {
+    let node_ids: Vec<_> = graph
+        .nodes()
+        .filter(|(_, n)| n.valid_from.is_none())
+        .map(|(id, _)| id)
+        .collect();
+    for id in node_ids {
+        if let Some(node) = graph.node_mut(id) {
+            node.valid_from = Some(commit.to_string());
+        }
+    }
+    let edge_ids: Vec<_> = graph
+        .edges()
+        .filter(|(_, _, _, e)| e.valid_from.is_none())
+        .map(|(id, _, _, _)| id)
+        .collect();
+    for id in edge_ids {
+        if let Some(edge) = graph.edge_mut(id) {
+            edge.valid_from = Some(commit.to_string());
+        }
+    }
+}
+
 /// Build the graph from a directory of source files.
 pub fn cmd_build(db: &Path, path: &Path) -> Result<()> {
     let mut graph = Graph::new();
@@ -247,6 +306,10 @@ pub fn cmd_build(db: &Path, path: &Path) -> Result<()> {
         graph.node_count(),
         graph.edge_count()
     );
+    // Stamp active rows with HEAD so temporal diffs have a baseline.
+    if let Some(head) = super::git::git_commit_hash("HEAD")? {
+        stamp_valid_from(&mut graph, &head);
+    }
     let mut store = Store::open(db)?;
     store.save(&graph)?;
     let hashes = collect_file_hashes(path)?;
@@ -285,6 +348,26 @@ pub fn cmd_update(db: &Path, path: &Path) -> Result<()> {
 
     let mut stale = changed.clone();
     stale.extend(deleted.iter().cloned());
+
+    // Archive the rows about to be removed so a temporal diff can still
+    // see their pre-change state: close them out at HEAD (valid_to). Also
+    // remember each symbol's original birth commit so survivors keep it
+    // rather than looking newly-introduced after re-extraction.
+    let head = super::git::git_commit_hash("HEAD")?;
+    let mut original_valid_from: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    if let Some(head) = head.as_deref() {
+        let old_nodes = store.active_nodes_for_sources(&stale)?;
+        let old_edges = store.active_edges_for_sources(&stale)?;
+        for row in &old_nodes {
+            if let Some(vf) = &row.node.valid_from {
+                original_valid_from.insert(row.node.qualified_name.clone(), vf.clone());
+            }
+        }
+        store.archive_nodes(&old_nodes, head)?;
+        store.archive_edges(&old_edges, head)?;
+    }
+
     store.delete_sources(&stale)?;
 
     let mut graph = store.load()?;
@@ -295,6 +378,21 @@ pub fn cmd_update(db: &Path, path: &Path) -> Result<()> {
         }
     }
     resolve_call_placeholders(&mut graph);
+    if let Some(head) = head.as_deref() {
+        // Survivors keep their original birth commit; genuinely-new
+        // symbols are stamped at HEAD.
+        let carry: Vec<_> = graph
+            .nodes()
+            .filter(|(_, n)| n.valid_from.is_none())
+            .filter_map(|(id, n)| original_valid_from.get(&n.qualified_name).map(|vf| (id, vf.clone())))
+            .collect();
+        for (id, vf) in carry {
+            if let Some(node) = graph.node_mut(id) {
+                node.valid_from = Some(vf);
+            }
+        }
+        stamp_valid_from(&mut graph, head);
+    }
     store.save(&graph)?;
     store.set_file_hashes(&current)?;
 
@@ -506,6 +604,50 @@ pub fn cmd_status(db: &Path) -> Result<()> {
     println!("ariadne db: {}", db.display());
     println!("  nodes: {}", n);
     println!("  edges: {}", e);
+    Ok(())
+}
+
+/// Rebuild the SQLite FTS5 node index.
+pub fn cmd_rebuild_fts(db: &Path) -> Result<()> {
+    let mut store = Store::open(db)?;
+    let indexed = store.rebuild_fts_index()?;
+    println!("rebuilt FTS5 index: {} nodes", indexed);
+    Ok(())
+}
+
+/// Build lightweight local embeddings used as a semantic search boost.
+pub fn cmd_embed(db: &Path, model: &str) -> Result<()> {
+    let mut store = Store::open(db)?;
+    let count = store.rebuild_embeddings(model)?;
+    println!("built {} embeddings with model {}", count, model);
+    Ok(())
+}
+
+/// Open the interactive terminal UI.
+pub fn cmd_tui(db: &Path) -> Result<()> {
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+    ariadne_graph::tui::run(&store, &graph)
+}
+
+/// Diff two graph snapshots using temporal valid_from / valid_to rows.
+pub fn cmd_graph_diff(db: &Path, base: &str, head: &str, top: usize) -> Result<()> {
+    let report = super::response::graph_diff_json(db, base, head, top)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// Drop edges from a symbol and re-run BFS to report what becomes unreachable.
+pub fn cmd_counterfactual(db: &Path, symbol: &str, direction: &str, max_depth: usize) -> Result<()> {
+    let report = super::response::counterfactual_json(db, symbol, direction, max_depth)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// Match subgraph motifs (built-in patterns or a supplied pattern file).
+pub fn cmd_motifs(db: &Path, built_in: &str, limit: usize) -> Result<()> {
+    let report = super::response::motifs_json(db, built_in, limit)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
