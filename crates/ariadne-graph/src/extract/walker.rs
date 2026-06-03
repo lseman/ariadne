@@ -57,6 +57,7 @@ pub fn extract_directory(root: &Path, graph: &mut Graph) -> Result<usize> {
         count += 1;
     }
     resolve_call_placeholders(graph);
+    super::concept::markdown::resolve_mentions(graph);
     derive_tested_by_edges(graph);
     super::flows::compute_flows(graph);
     Ok(count)

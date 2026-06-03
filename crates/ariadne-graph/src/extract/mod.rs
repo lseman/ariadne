@@ -27,6 +27,7 @@ pub use flows::{
     affected_flows, all_flows, compute_flows, compute_flows_with_options, flows_through,
     FlowOptions,
 };
+pub use concept::markdown::resolve_mentions;
 pub use walker::{
     derive_tested_by_edges, extract_directory, extract_file, ignore_set, is_supported,
     resolve_call_placeholders, should_suppress_call_placeholder, IgnoreSet,

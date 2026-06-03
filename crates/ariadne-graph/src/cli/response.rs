@@ -198,6 +198,10 @@ pub fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value
             let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
             compact_for_detail(gaps_json(&graph, limit), detail)
         }
+        "surprises" | "surprise_scoring" => {
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+            compact_for_detail(surprises_json(&graph, limit), detail)
+        }
         "diagnostics" | "health" => {
             let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
             compact_for_detail(diagnostics_json(db, limit)?, detail)
@@ -1071,6 +1075,99 @@ pub fn gaps_json(graph: &Graph, limit: usize) -> Value {
     json!({ "operation": "gaps", "hits": rows })
 }
 
+/// Coarse language label derived from a node's source file extension.
+/// Returns `None` for synthetic nodes with no source.
+fn language_of(node: &ariadne_graph::core::Node) -> Option<&'static str> {
+    let uri = node.source_uri.as_deref()?;
+    let ext = uri.rsplit('.').next()?;
+    Some(match ext {
+        "rs" => "rust",
+        "py" => "python",
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx" => "cpp",
+        "md" | "markdown" => "markdown",
+        "tex" => "latex",
+        "svg" => "diagram",
+        _ => return None,
+    })
+}
+
+/// Rank "surprising" edges: those that cross a community boundary, cross a
+/// language boundary, or couple two high-degree hubs. These are the edges
+/// most likely to represent unexpected coupling worth a human's attention.
+pub fn surprises_json(graph: &Graph, limit: usize) -> Value {
+    let communities = leiden(graph);
+
+    // Degree per node, and the threshold above which a node is a "hub"
+    // (top decile by degree, with a small floor so tiny graphs behave).
+    let degree = |id: NodeId| graph.in_neighbors(id).count() + graph.out_neighbors(id).count();
+    let mut degrees: Vec<usize> = graph.nodes().map(|(id, _)| degree(id)).collect();
+    degrees.sort_unstable();
+    let hub_threshold = if degrees.is_empty() {
+        usize::MAX
+    } else {
+        let idx = (degrees.len() as f64 * 0.9) as usize;
+        degrees[idx.min(degrees.len() - 1)].max(4)
+    };
+
+    let mut rows: Vec<Value> = Vec::new();
+    for (id, src, dst, _edge) in graph.edges() {
+        // Skip edges into unresolved placeholders — their "surprise" is
+        // just missing resolution, not real coupling.
+        let (Some(s), Some(d)) = (graph.node(src), graph.node(dst)) else {
+            continue;
+        };
+        if s.qualified_name.starts_with("call::") || d.qualified_name.starts_with("call::") {
+            continue;
+        }
+
+        let mut signals: Vec<&str> = Vec::new();
+        let mut score = 0.0f32;
+
+        match (communities.get(&src), communities.get(&dst)) {
+            (Some(a), Some(b)) if a != b => {
+                signals.push("cross_community");
+                score += 1.0;
+            }
+            _ => {}
+        }
+        if let (Some(ls), Some(ld)) = (language_of(s), language_of(d)) {
+            if ls != ld {
+                signals.push("cross_language");
+                score += 1.5;
+            }
+        }
+        let (ds, dd) = (degree(src), degree(dst));
+        if ds >= hub_threshold && dd >= hub_threshold {
+            signals.push("hub_coupling");
+            // Scale by how far both endpoints exceed the threshold.
+            score += 1.0 + ((ds + dd) as f32 / (2.0 * hub_threshold as f32)).min(3.0);
+        }
+
+        if signals.is_empty() {
+            continue;
+        }
+        rows.push(json!({
+            "id": id.0,
+            "score": score,
+            "signals": signals,
+            "src": s.qualified_name,
+            "dst": d.qualified_name,
+            "src_degree": ds,
+            "dst_degree": dd,
+            "source_uri": s.source_uri.clone().or_else(|| d.source_uri.clone()),
+        }));
+    }
+
+    rows.sort_by(|a, b| {
+        b["score"]
+            .as_f64()
+            .partial_cmp(&a["score"].as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    rows.truncate(limit);
+    json!({ "operation": "surprises", "hub_threshold": hub_threshold, "hits": rows })
+}
+
 /// Graph health report: index coverage, confidence mix, unresolved calls,
 /// and warnings.
 ///
@@ -1618,6 +1715,34 @@ fn changed_ranges_json(graph: &Graph, diff: &[ChangedFile]) -> Vec<Value> {
 mod tests {
     use super::*;
     use ariadne_graph::core::{Edge, EdgeKind, Node, NodeKind};
+
+    #[test]
+    fn surprises_flags_cross_language_edge() {
+        // A Rust function with an edge to a Python function is a
+        // cross-language coupling and must be flagged.
+        let mut g = Graph::new();
+        let mut rs = Node::new(NodeKind::Function, "rs::process_payment");
+        rs.source_uri = Some("src/pay.rs".to_string());
+        let rs_id = g.add_node(rs);
+        let mut py = Node::new(NodeKind::Function, "py::charge");
+        py.source_uri = Some("billing/charge.py".to_string());
+        let py_id = g.add_node(py);
+        g.add_edge(rs_id, py_id, Edge::extracted(EdgeKind::Calls));
+
+        let out = surprises_json(&g, 10);
+        let hits = out["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1, "expected one surprising edge, got {hits:?}");
+        let signals: Vec<&str> = hits[0]["signals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            signals.contains(&"cross_language"),
+            "expected cross_language signal, got {signals:?}"
+        );
+    }
 
     /// Save a small graph to a temp-file db and run `diagnostics_json`
     /// against it (the function opens the store by path, so an in-memory

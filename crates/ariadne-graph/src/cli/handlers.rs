@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use ariadne_graph::Graph;
-use ariadne_graph::extract::{extract_directory, extract_file, resolve_call_placeholders};
+use ariadne_graph::extract::{extract_directory, extract_file, resolve_call_placeholders, resolve_mentions};
 use ariadne_graph::query::{
     analyze_impact, callees_of, callers_of, ImpactQuery,
 };
@@ -162,6 +162,11 @@ pub enum Commands {
     },
     /// Report graph health, index coverage, confidence mix, and unresolved calls.
     Diagnostics {
+        #[arg(long, default_value_t = 25)]
+        top: usize,
+    },
+    /// Rank unexpected cross-community, cross-language, and hub-coupling edges.
+    Surprises {
         #[arg(long, default_value_t = 25)]
         top: usize,
     },
@@ -378,6 +383,7 @@ pub fn cmd_update(db: &Path, path: &Path) -> Result<()> {
         }
     }
     resolve_call_placeholders(&mut graph);
+    resolve_mentions(&mut graph);
     if let Some(head) = head.as_deref() {
         // Survivors keep their original birth commit; genuinely-new
         // symbols are stamped at HEAD.
@@ -887,6 +893,14 @@ pub fn cmd_gaps(db: &Path, top: usize) -> Result<()> {
 pub fn cmd_diagnostics(db: &Path, top: usize) -> Result<()> {
     let report = super::response::diagnostics_json(db, top)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// Rank unexpected cross-community, cross-language, and hub-coupling edges.
+pub fn cmd_surprises(db: &Path, top: usize) -> Result<()> {
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+    println!("{}", serde_json::to_string_pretty(&super::response::surprises_json(&graph, top))?);
     Ok(())
 }
 

@@ -126,34 +126,23 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
                     for (i, chunk) in tokens.iter().enumerate() {
                         if i % 2 == 1 {
                             // Even indices are outside code, odd are inside.
-                            if let Some(target) = resolve_symbol(graph, chunk) {
-                                graph.add_edge(
-                                    current_section_id,
-                                    target,
-                                    Edge::inferred(EdgeKind::Mentions, 0.85),
-                                );
-                            }
+                            mention(graph, current_section_id, chunk, 0.85);
                         }
                     }
                 }
             }
             Event::Start(Tag::Link { link_type, dest_url, title: _, id }) => {
-                eprintln!("DEBUG Link: type={:?} dest_url={:?} id={:?}", link_type, dest_url, id);
-                eprintln!("DEBUG Link: refs keys={:?}", refs.keys().collect::<Vec<_>>());
                 match link_type {
                     pulldown_cmark::LinkType::Reference
                     | pulldown_cmark::LinkType::Collapsed
                     | pulldown_cmark::LinkType::Shortcut => {
                         // Resolve the reference.
                         let target = if let Some((url, _)) = refs.get(id.as_ref()) {
-                            eprintln!("DEBUG Link: resolved ref {:?} -> {:?}", id, url);
                             url.clone()
                         } else {
-                            eprintln!("DEBUG Link: NO ref match for {:?}", id);
                             dest_url.to_string()
                         };
                         // Try to extract a symbol name from the URL.
-                        eprintln!("DEBUG Link: extracting from url={:?}", target);
                         extract_symbol_from_url(&target, graph, current_section_id, file_qn.as_str());
                     }
                     pulldown_cmark::LinkType::Inline => {
@@ -199,13 +188,7 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
             | Event::End(TagEnd::BlockQuote) => {}
             Event::Start(Tag::FootnoteDefinition(name)) => {
                 // Extract symbol from footnote name.
-                if let Some(target) = resolve_symbol(graph, &name) {
-                    graph.add_edge(
-                        current_section_id,
-                        target,
-                        Edge::inferred(EdgeKind::Mentions, 0.85),
-                    );
-                }
+                mention(graph, current_section_id, &name, 0.85);
             }
             Event::End(TagEnd::FootnoteDefinition) => {}
             Event::Html(_) | Event::InlineHtml(_) => {}
@@ -222,13 +205,7 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
             | Event::End(TagEnd::Image) => {}
             Event::Code(code) => {
                 // Inline code — same as Text with backticks.
-                if let Some(target) = resolve_symbol(graph, &code) {
-                    graph.add_edge(
-                        current_section_id,
-                        target,
-                        Edge::inferred(EdgeKind::Mentions, 0.85),
-                    );
-                }
+                mention(graph, current_section_id, &code, 0.85);
             }
             _ => {}
         }
@@ -297,13 +274,7 @@ fn extract_symbols_from_code(
 ) {
     // Split on word boundaries and try to resolve each token.
     for token in tokenize_code(code) {
-        if let Some(target) = resolve_symbol(graph, &token) {
-            graph.add_edge(
-                section_id,
-                target,
-                Edge::inferred(EdgeKind::Mentions, 0.80),
-            );
-        }
+        mention(graph, section_id, &token, 0.80);
     }
 }
 
@@ -327,13 +298,7 @@ fn extract_symbol_from_url(
     // Strip common file suffixes (.html, .md, .txt, etc.) only.
     let candidate = strip_file_suffix(candidate);
     if !candidate.is_empty() && candidate.len() >= 2 {
-        if let Some(target) = resolve_symbol(graph, candidate) {
-            graph.add_edge(
-                section_id,
-                target,
-                Edge::inferred(EdgeKind::Mentions, 0.70),
-            );
-        }
+        mention(graph, section_id, candidate, 0.70);
     }
 }
 
@@ -367,6 +332,79 @@ fn tokenize_code(code: &str) -> Vec<String> {
         tokens.push(current);
     }
     tokens
+}
+
+/// Record a mention of `token` from `section_id`.
+///
+/// If the symbol already exists in the graph it is linked immediately
+/// (the common same-file / already-extracted case). Otherwise the token
+/// is stashed on the section node so [`resolve_mentions`] can link it in a
+/// post-pass once every file has been extracted — markdown is often walked
+/// before the code it references.
+fn mention(graph: &mut Graph, section_id: NodeId, token: &str, confidence: f32) {
+    if token.len() < 2 {
+        return;
+    }
+    if let Some(target) = resolve_symbol(graph, token) {
+        graph.add_edge(section_id, target, Edge::inferred(EdgeKind::Mentions, confidence));
+        return;
+    }
+    if let Some(node) = graph.node_mut(section_id) {
+        let entry = node
+            .properties
+            .entry("pending_mentions".to_string())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if let Some(arr) = entry.as_array_mut() {
+            let val = serde_json::json!([token, confidence]);
+            if !arr.contains(&val) {
+                arr.push(val);
+            }
+        }
+    }
+}
+
+/// Resolve mentions that could not be linked at extraction time because
+/// their target symbol had not been extracted yet. Runs as a post-pass
+/// over the complete graph and clears the `pending_mentions` markers it
+/// consumes. Idempotent: never adds a duplicate `Mentions` edge.
+pub fn resolve_mentions(graph: &mut Graph) -> usize {
+    let pending: Vec<(NodeId, Vec<(String, f32)>)> = graph
+        .nodes()
+        .filter_map(|(id, node)| {
+            let arr = node.properties.get("pending_mentions")?.as_array()?;
+            let tokens: Vec<(String, f32)> = arr
+                .iter()
+                .filter_map(|v| {
+                    let pair = v.as_array()?;
+                    Some((pair.first()?.as_str()?.to_string(), pair.get(1)?.as_f64()? as f32))
+                })
+                .collect();
+            (!tokens.is_empty()).then_some((id, tokens))
+        })
+        .collect();
+
+    let existing: std::collections::HashSet<(NodeId, NodeId)> = graph
+        .edges()
+        .filter(|(_, _, _, e)| e.kind == EdgeKind::Mentions)
+        .map(|(_, src, dst, _)| (src, dst))
+        .collect();
+
+    let mut added = 0;
+    for (section_id, tokens) in pending {
+        for (token, confidence) in tokens {
+            if let Some(target) = resolve_symbol(graph, &token) {
+                if existing.contains(&(section_id, target)) {
+                    continue;
+                }
+                graph.add_edge(section_id, target, Edge::inferred(EdgeKind::Mentions, confidence));
+                added += 1;
+            }
+        }
+        if let Some(node) = graph.node_mut(section_id) {
+            node.properties.remove("pending_mentions");
+        }
+    }
+    added
 }
 
 /// Resolve a symbol name to a graph node.
@@ -525,6 +563,37 @@ Use the `compute_hash` function to compute the hash.
             "function should have at least one Mentions edge; got {}",
             mentions.len()
         );
+    }
+
+    #[test]
+    fn resolve_mentions_links_symbols_extracted_after_the_doc() {
+        // The doc is extracted before the code it references — the common
+        // case when a top-level README is walked before files in src/.
+        // Inline resolution finds nothing; the post-pass must link it.
+        let mut g = Graph::new();
+        let source = "# Design\n\nThe `process_payment` function handles billing.\n";
+        let path = Path::new("/tmp/ariadne_md_postpass.md");
+        std::fs::write(path, source).unwrap();
+        extract_file(path, &mut g).unwrap();
+        std::fs::remove_file(path).ok();
+
+        // No edge yet — the symbol does not exist at extraction time.
+        let func = g.add_node(Node::new(NodeKind::Function, "src::pay.rs::process_payment"));
+        let before = g.in_neighbors(func).filter(|(_, e)| e.kind == EdgeKind::Mentions).count();
+        assert_eq!(before, 0, "edge should not exist before the post-pass");
+
+        let added = resolve_mentions(&mut g);
+        assert_eq!(added, 1, "post-pass should add exactly one Mentions edge");
+        let after = g.in_neighbors(func).filter(|(_, e)| e.kind == EdgeKind::Mentions).count();
+        assert_eq!(after, 1, "post-pass should link the doc to the symbol");
+
+        // pending_mentions markers are consumed, not left to persist.
+        assert!(
+            g.nodes().all(|(_, n)| !n.properties.contains_key("pending_mentions")),
+            "pending_mentions must be cleared after the post-pass"
+        );
+        // Idempotent: a second pass adds nothing.
+        assert_eq!(resolve_mentions(&mut g), 0);
     }
 
     #[test]

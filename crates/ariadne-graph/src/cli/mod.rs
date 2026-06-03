@@ -71,6 +71,7 @@ pub fn run(db: &Path, command: &handlers::Commands) -> Result<()> {
         Commands::Articulation { top } => cmd_articulation(db, *top),
         Commands::Gaps { top } => cmd_gaps(db, *top),
         Commands::Diagnostics { top } => cmd_diagnostics(db, *top),
+        Commands::Surprises { top } => cmd_surprises(db, *top),
         Commands::RebuildFts => cmd_rebuild_fts(db),
         Commands::Embed { model } => cmd_embed(db, model),
         Commands::Tui => cmd_tui(db),
