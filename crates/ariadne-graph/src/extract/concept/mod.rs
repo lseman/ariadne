@@ -5,5 +5,6 @@
 //! `Function` / `Class` node from pass 1. Edges emitted here always
 //! carry `Confidence::Inferred(score)`.
 
+pub mod html;
 pub mod latex;
 pub mod markdown;

@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
-use ariadne_graph::{Graph, NodeId, NodeKind};
 use ariadne_graph::query::search_by_name;
+use ariadne_graph::{Graph, NodeId, NodeKind};
 use std::collections::HashSet;
 
 /// Resolve a symbol name to a NodeId with disambiguation logic.
@@ -90,31 +90,52 @@ pub fn is_test_like_node(node: &ariadne_graph::Node) -> bool {
         || node.name.starts_with("Test")
         || node.name.ends_with("_test")
         || node.name.ends_with("Test")
-        || node.source_uri.as_ref().map(|s| {
-            s.contains("/test/")
-                || s.contains("/tests/")
-                || s.contains("_test.")
-                || s.ends_with("_test.rs")
-                || s.ends_with("_test.py")
-                || s.ends_with("_test.ts")
-                || s.ends_with("_test.js")
-        }).unwrap_or(false)
+        || node
+            .source_uri
+            .as_ref()
+            .map(|s| {
+                s.contains("/test/")
+                    || s.contains("/tests/")
+                    || s.contains("_test.")
+                    || s.ends_with("_test.rs")
+                    || s.ends_with("_test.py")
+                    || s.ends_with("_test.ts")
+                    || s.ends_with("_test.js")
+            })
+            .unwrap_or(false)
 }
 
 /// Check if a call is actionable (unresolved but has incoming edges).
 #[allow(dead_code)]
 pub fn is_actionable_unresolved_call(node: &ariadne_graph::Node) -> bool {
-    node.qualified_name.starts_with("call::")
-        && node.name != "?"
+    node.qualified_name.starts_with("call::") && node.name != "?"
 }
 
 /// Check if a call name is low-signal (too generic to resolve).
 #[allow(dead_code)]
 pub fn is_low_signal_call_name(name: &str) -> bool {
     let low_signal = [
-        "get", "set", "new", "create", "init", "build", "parse", "format",
-        "write", "read", "open", "close", "start", "stop", "run", "exec",
-        "handle", "process", "render", "validate", "transform",
+        "get",
+        "set",
+        "new",
+        "create",
+        "init",
+        "build",
+        "parse",
+        "format",
+        "write",
+        "read",
+        "open",
+        "close",
+        "start",
+        "stop",
+        "run",
+        "exec",
+        "handle",
+        "process",
+        "render",
+        "validate",
+        "transform",
     ];
     low_signal.contains(&name.to_lowercase().as_str())
 }
@@ -123,9 +144,25 @@ pub fn is_low_signal_call_name(name: &str) -> bool {
 #[allow(dead_code)]
 pub fn is_generic_utility_name(name: &str) -> bool {
     let utils = [
-        "main", "init", "drop", "clone", "from", "into", "into_iter",
-        "next", "len", "is_empty", "iter", "push", "pop", "insert",
-        "remove", "get", "set", "add", "remove",
+        "main",
+        "init",
+        "drop",
+        "clone",
+        "from",
+        "into",
+        "into_iter",
+        "next",
+        "len",
+        "is_empty",
+        "iter",
+        "push",
+        "pop",
+        "insert",
+        "remove",
+        "get",
+        "set",
+        "add",
+        "remove",
     ];
     utils.contains(&name.to_lowercase().as_str())
 }
@@ -133,17 +170,12 @@ pub fn is_generic_utility_name(name: &str) -> bool {
 /// Check if a node is rankable (not a utility or test).
 #[allow(dead_code)]
 pub fn is_rankable_node(node: &ariadne_graph::Node) -> bool {
-    !is_generic_utility_name(&node.name)
-        && !is_low_signal_call_name(&node.name)
+    !is_generic_utility_name(&node.name) && !is_low_signal_call_name(&node.name)
 }
 
 /// BFS-reachable nodes from a seed.
 #[allow(dead_code)]
-pub fn bfs_reachable(
-    graph: &Graph,
-    seed: NodeId,
-    max_depth: usize,
-) -> HashSet<NodeId> {
+pub fn bfs_reachable(graph: &Graph, seed: NodeId, max_depth: usize) -> HashSet<NodeId> {
     let mut seen = HashSet::from([seed]);
     let mut queue = vec![seed];
     let mut depth = 0usize;
@@ -209,12 +241,9 @@ pub fn source_files_tokens(_graph: &Graph, source_files: &[String], max_lines: u
     source_files
         .iter()
         .filter_map(|path| {
-            std::fs::read_to_string(path).ok().map(|content| {
-                content
-                    .lines()
-                    .take(max_lines)
-                    .count()
-            })
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|content| content.lines().take(max_lines).count())
         })
         .sum()
 }
@@ -229,12 +258,9 @@ pub fn token_scenario(
     let file_tokens = source_files
         .iter()
         .filter_map(|path| {
-            std::fs::read_to_string(path).ok().map(|content| {
-                content
-                    .lines()
-                    .take(max_lines_per_file)
-                    .count()
-            })
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|content| content.lines().take(max_lines_per_file).count())
         })
         .sum::<usize>();
     file_tokens + (num_impacted * 200)
@@ -311,10 +337,7 @@ pub fn nodes_for_changed_hunk(
 }
 
 /// Nodes for changed ranges.
-pub fn nodes_for_changed_ranges(
-    graph: &Graph,
-    diff: &[super::git::ChangedFile],
-) -> Vec<NodeId> {
+pub fn nodes_for_changed_ranges(graph: &Graph, diff: &[super::git::ChangedFile]) -> Vec<NodeId> {
     let mut nodes = Vec::new();
     for file in diff {
         for hunk in &file.hunks {

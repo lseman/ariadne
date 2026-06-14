@@ -1,10 +1,12 @@
 use anyhow::{bail, Result};
-use ariadne_graph::Graph;
-use ariadne_graph::extract::{extract_directory, extract_file, resolve_call_placeholders, resolve_mentions};
+use ariadne_graph::extract::{
+    extract_directory, extract_file, resolve_call_placeholders, resolve_mentions,
+};
 use ariadne_graph::query::{
-    analyze_impact, callees_of, callers_of, ImpactQuery,
+    analyze_impact, callees_of, callers_of, deduplicate_nodes, DedupOptions, ImpactQuery,
 };
 use ariadne_graph::store::Store;
+use ariadne_graph::Graph;
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::io::BufRead;
@@ -12,11 +14,12 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use super::response::{
-    architecture_overview_json, detect_changes_json, DetailLevel, large_functions_json,
-    review_context_json, tool_response, traverse_json,
-};
 use super::git::collect_file_hashes;
+use super::response::{
+    architecture_overview_json, detect_changes_json, generate_report_markdown,
+    large_functions_json, review_context_json, tool_response, traverse_json, DetailLevel,
+};
+use serde_json::Value;
 
 #[derive(Parser)]
 #[command(
@@ -42,6 +45,8 @@ pub enum Commands {
     /// Watch a path and incrementally update when supported files change.
     Watch {
         path: PathBuf,
+        /// Polling interval in seconds, used only when OS file events
+        /// are unavailable.
         #[arg(long, default_value_t = 2)]
         interval: u64,
     },
@@ -233,13 +238,31 @@ pub enum Commands {
         #[arg(long)]
         seed: Option<String>,
     },
-    /// Detect communities with Louvain or Leiden-style refinement.
+    /// Detect communities with Louvain, Leiden, or Infomap.
     Communities {
         #[arg(long, default_value_t = 20)]
         top: usize,
-        /// Community algorithm: louvain or leiden.
+        /// Community algorithm: louvain, leiden, or infomap.
         #[arg(long, default_value = "louvain")]
         algorithm: String,
+    },
+    /// Deduplicate semantically equivalent concept/document nodes.
+    ///
+    /// Runs a multi-pass pipeline (normalization → entropy gate → MinHash/LSH
+    /// → Jaro-Winkler) to find and merge nodes with similar labels across
+    /// extraction sources. Only affects Concept, Document, Section, Diagram,
+    /// Image, and Hyperedge nodes — code nodes already have unique qualified
+    /// names.
+    Dedup {
+        /// Minimum Jaro-Winkler threshold for merging. Default: 0.92.
+        #[arg(long, default_value_t = 0.92)]
+        threshold: f32,
+        /// Community similarity boost for same-community pairs. Default: 0.05.
+        #[arg(long, default_value_t = 0.05)]
+        community_boost: f32,
+        /// Community algorithm for boost: louvain, leiden, or infomap (empty = no boost).
+        #[arg(long)]
+        community_algo: Option<String>,
     },
     /// List execution flows ranked by criticality.
     Flows {
@@ -251,6 +274,31 @@ pub enum Commands {
         #[arg(long, default_value = "HEAD~1")]
         base: String,
         #[arg(long, default_value_t = 10)]
+        top: usize,
+    },
+    /// Compact summary of changed files, symbols, and impacted nodes.
+    BlastRadius {
+        #[arg(long, default_value = "HEAD~1")]
+        base: String,
+        #[arg(long, default_value_t = 2)]
+        max_depth: usize,
+        #[arg(long, default_value_t = 25)]
+        top: usize,
+    },
+    /// Report test coverage for changed symbols or a specific target.
+    TestCoverage {
+        /// Analyze changed symbols since this base.
+        #[arg(long)]
+        base: Option<String>,
+        /// Analyze this specific target symbol.
+        target: Option<String>,
+    },
+    /// Write a Markdown report to a file.
+    Report {
+        /// Output file path.
+        output: String,
+        /// Number of items per section.
+        #[arg(long, default_value_t = 25)]
         top: usize,
     },
     /// Search nodes by name.
@@ -265,8 +313,10 @@ pub enum DaemonCommands {
         #[arg(long)]
         alias: Option<String>,
     },
-    /// Start polling all registered repositories.
+    /// Start watching all registered repositories.
     Start {
+        /// Polling interval in seconds, used only when OS file events
+        /// are unavailable.
         #[arg(long, default_value_t = 5)]
         interval: u64,
     },
@@ -315,6 +365,15 @@ pub fn cmd_build(db: &Path, path: &Path) -> Result<()> {
     if let Some(head) = super::git::git_commit_hash("HEAD")? {
         stamp_valid_from(&mut graph, &head);
     }
+    // Deduplicate semantically equivalent concept nodes.
+    let dedup_result = run_dedup_on_graph(&mut graph, None);
+    tracing::info!(
+        dedup_candidates = dedup_result.candidates_examined,
+        dedup_merges = dedup_result.merges,
+        dedup_removed = dedup_result.nodes_removed,
+        dedup_rewired = dedup_result.edges_rewired,
+        "deduplication complete"
+    );
     let mut store = Store::open(db)?;
     store.save(&graph)?;
     let hashes = collect_file_hashes(path)?;
@@ -390,7 +449,11 @@ pub fn cmd_update(db: &Path, path: &Path) -> Result<()> {
         let carry: Vec<_> = graph
             .nodes()
             .filter(|(_, n)| n.valid_from.is_none())
-            .filter_map(|(id, n)| original_valid_from.get(&n.qualified_name).map(|vf| (id, vf.clone())))
+            .filter_map(|(id, n)| {
+                original_valid_from
+                    .get(&n.qualified_name)
+                    .map(|vf| (id, vf.clone()))
+            })
             .collect();
         for (id, vf) in carry {
             if let Some(node) = graph.node_mut(id) {
@@ -399,6 +462,15 @@ pub fn cmd_update(db: &Path, path: &Path) -> Result<()> {
         }
         stamp_valid_from(&mut graph, head);
     }
+    // Deduplicate semantically equivalent concept nodes.
+    let dedup_result = run_dedup_on_graph(&mut graph, None);
+    tracing::info!(
+        dedup_candidates = dedup_result.candidates_examined,
+        dedup_merges = dedup_result.merges,
+        dedup_removed = dedup_result.nodes_removed,
+        dedup_rewired = dedup_result.edges_rewired,
+        "deduplication complete"
+    );
     store.save(&graph)?;
     store.set_file_hashes(&current)?;
 
@@ -412,10 +484,69 @@ pub fn cmd_update(db: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Run dedup on the given graph using the specified community algorithm
+/// (or Leiden by default). Returns a `DedupResult` summary.
+fn run_dedup_on_graph(
+    graph: &mut Graph,
+    community_algo: Option<&str>,
+) -> ariadne_graph::query::dedup::DedupResult {
+    use ariadne_graph::core::NodeKind;
+    use std::collections::HashMap;
+
+    // Dedup only touches Concept/Document/Section/Diagram/Image/Hyperedge.
+    // Skip entirely when there are too few eligible nodes.
+    let eligible_kinds = [
+        NodeKind::Concept,
+        NodeKind::Document,
+        NodeKind::Section,
+        NodeKind::Diagram,
+        NodeKind::Image,
+        NodeKind::Hyperedge,
+    ];
+    let eligible_count = graph
+        .nodes()
+        .filter(|(_, n)| eligible_kinds.contains(&n.kind))
+        .count();
+    if eligible_count < 2 {
+        return ariadne_graph::query::dedup::DedupResult {
+            candidates_examined: 0,
+            merges: 0,
+            nodes_removed: 0,
+            edges_rewired: 0,
+        };
+    }
+
+    // Compute communities for the boost pass.
+    let communities: HashMap<ariadne_graph::core::NodeId, usize> = match community_algo {
+        Some("louvain") => ariadne_graph::query::louvain(graph),
+        Some("infomap") => ariadne_graph::query::infomap(graph),
+        _ => ariadne_graph::query::leiden(graph),
+    };
+
+    let options = DedupOptions::default();
+    deduplicate_nodes(graph, &communities, Some(options))
+}
+
+/// Quiet period after the first file event before running an update, so
+/// editor save bursts and branch switches collapse into one rebuild.
+const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
+
 /// Watch a path and incrementally update when supported files change.
+///
+/// Uses OS file events (inotify / FSEvents / ReadDirectoryChangesW) with
+/// a short debounce. Falls back to polling every `interval` seconds when
+/// a watcher cannot be created (e.g. network filesystems).
 pub fn cmd_watch(db: &Path, path: &Path, interval: u64) -> Result<()> {
+    let err = match watch_event_driven(db, &[path.to_path_buf()]) {
+        Err(e) => e,
+        Ok(never) => match never {},
+    };
+    tracing::warn!(
+        "file watcher unavailable ({}); falling back to polling",
+        err
+    );
     println!(
-        "watching {} for Ariadne graph updates every {}s",
+        "watching {} for Ariadne graph updates every {}s (polling)",
         path.display(),
         interval
     );
@@ -425,10 +556,80 @@ pub fn cmd_watch(db: &Path, path: &Path, interval: u64) -> Result<()> {
     }
 }
 
+/// Never-returning success type: the event loop only exits by error.
+enum Never {}
+
+/// Watch every root with one OS watcher and run `cmd_update` on the
+/// roots whose relevant files changed, after a debounce window.
+fn watch_event_driven(db: &Path, roots: &[PathBuf]) -> Result<Never> {
+    use ariadne_graph::extract::{ignore_set, is_relevant_source, IgnoreSet};
+    use notify::{RecursiveMode, Watcher};
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(tx)?;
+    let mut watched: Vec<(PathBuf, IgnoreSet)> = Vec::new();
+    for root in roots {
+        let root = super::git::absolute_path(root)?;
+        watcher.watch(&root, RecursiveMode::Recursive)?;
+        let ignore = ignore_set(&root);
+        watched.push((root, ignore));
+    }
+    println!(
+        "watching {} path(s) for file events (debounce {}ms)",
+        watched.len(),
+        WATCH_DEBOUNCE.as_millis()
+    );
+
+    // Catch up on anything that changed while no watcher was running.
+    for (root, _) in &watched {
+        if let Err(e) = cmd_update(db, root) {
+            tracing::warn!("initial update failed for {}: {}", root.display(), e);
+        }
+    }
+
+    let mark_dirty = |event: &notify::Result<notify::Event>,
+                      dirty: &mut std::collections::HashSet<usize>| {
+        let Ok(event) = event else { return };
+        for path in &event.paths {
+            for (idx, (root, ignore)) in watched.iter().enumerate() {
+                if path.starts_with(root) && is_relevant_source(root, path, ignore) {
+                    dirty.insert(idx);
+                }
+            }
+        }
+    };
+
+    loop {
+        // Block until something happens, then drain events until the
+        // filesystem has been quiet for a full debounce window.
+        let first = rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("watch channel closed"))?;
+        let mut dirty = std::collections::HashSet::new();
+        mark_dirty(&first, &mut dirty);
+        loop {
+            match rx.recv_timeout(WATCH_DEBOUNCE) {
+                Ok(event) => mark_dirty(&event, &mut dirty),
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    bail!("watch channel closed")
+                }
+            }
+        }
+        for idx in dirty {
+            let (root, _) = &watched[idx];
+            if let Err(e) = cmd_update(db, root) {
+                tracing::warn!("update failed for {}: {}", root.display(), e);
+            }
+        }
+    }
+}
+
 /// Manage registered repositories for continuous updates.
 pub fn cmd_daemon(db: &Path, command: DaemonCommands) -> Result<()> {
     use super::git::{load_daemon_repos, save_daemon_repos};
-    
+
     match command {
         DaemonCommands::Add { path, alias } => {
             let mut repos = load_daemon_repos()?;
@@ -456,17 +657,24 @@ pub fn cmd_daemon(db: &Path, command: DaemonCommands) -> Result<()> {
             if repos.is_empty() {
                 bail!("no repositories registered; run ariadne daemon add <path>");
             }
-            println!(
-                "Ariadne daemon polling {} repos every {}s",
-                repos.len(),
+            let roots: Vec<PathBuf> = repos
+                .iter()
+                .filter_map(|repo| repo["path"].as_str().map(PathBuf::from))
+                .collect();
+            println!("Ariadne daemon watching {} repos", roots.len());
+            let err = match watch_event_driven(db, &roots) {
+                Err(e) => e,
+                Ok(never) => match never {},
+            };
+            tracing::warn!(
+                "file watcher unavailable ({}); falling back to polling every {}s",
+                err,
                 interval
             );
             loop {
-                for repo in &repos {
-                    if let Some(path) = repo["path"].as_str() {
-                        if let Err(e) = cmd_update(db, Path::new(path)) {
-                            tracing::warn!("daemon update failed for {}: {}", path, e);
-                        }
+                for root in &roots {
+                    if let Err(e) = cmd_update(db, root) {
+                        tracing::warn!("daemon update failed for {}: {}", root.display(), e);
                     }
                 }
                 thread::sleep(Duration::from_secs(interval.max(1)));
@@ -587,7 +795,7 @@ fn mcp_servers_config(exe: &Path, db: &Path) -> serde_json::Value {
 /// Serve an interactive D3 graph explorer.
 pub fn cmd_serve(db: &Path, bind: &str, algorithm: &str) -> Result<()> {
     use std::net::TcpListener;
-    
+
     let listener = TcpListener::bind(bind)?;
     println!("Ariadne graph explorer listening on http://{}", bind);
     for stream in listener.incoming() {
@@ -644,7 +852,12 @@ pub fn cmd_graph_diff(db: &Path, base: &str, head: &str, top: usize) -> Result<(
 }
 
 /// Drop edges from a symbol and re-run BFS to report what becomes unreachable.
-pub fn cmd_counterfactual(db: &Path, symbol: &str, direction: &str, max_depth: usize) -> Result<()> {
+pub fn cmd_counterfactual(
+    db: &Path,
+    symbol: &str,
+    direction: &str,
+    max_depth: usize,
+) -> Result<()> {
     let report = super::response::counterfactual_json(db, symbol, direction, max_depth)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -666,9 +879,9 @@ pub fn cmd_paths(
     top: usize,
     structural_only: bool,
 ) -> Result<()> {
-    use ariadne_graph::query::paths::PathQuery;
     use super::helpers::resolve;
-    
+    use ariadne_graph::query::paths::PathQuery;
+
     let store = Store::open(db)?;
     let graph = store.load()?;
     let from_id = resolve(&graph, from)?;
@@ -866,7 +1079,10 @@ pub fn cmd_cycles(db: &Path, top: usize) -> Result<()> {
 pub fn cmd_core(db: &Path, top: usize) -> Result<()> {
     let store = Store::open(db)?;
     let graph = store.load()?;
-    println!("{}", serde_json::to_string_pretty(&super::response::core_json(&graph, top))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&super::response::core_json(&graph, top))?
+    );
     Ok(())
 }
 
@@ -885,7 +1101,10 @@ pub fn cmd_articulation(db: &Path, top: usize) -> Result<()> {
 pub fn cmd_gaps(db: &Path, top: usize) -> Result<()> {
     let store = Store::open(db)?;
     let graph = store.load()?;
-    println!("{}", serde_json::to_string_pretty(&super::response::gaps_json(&graph, top))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&super::response::gaps_json(&graph, top))?
+    );
     Ok(())
 }
 
@@ -900,7 +1119,10 @@ pub fn cmd_diagnostics(db: &Path, top: usize) -> Result<()> {
 pub fn cmd_surprises(db: &Path, top: usize) -> Result<()> {
     let store = Store::open(db)?;
     let graph = store.load()?;
-    println!("{}", serde_json::to_string_pretty(&super::response::surprises_json(&graph, top))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&super::response::surprises_json(&graph, top))?
+    );
     Ok(())
 }
 
@@ -934,8 +1156,8 @@ pub fn cmd_tool(db: &Path, operation: &str, params: &str) -> Result<()> {
 
 /// JSON-lines one-tool loop for MCP adapters and editor wrappers.
 pub fn cmd_mcp(db: &Path) -> Result<()> {
-    use super::mcp::{required_str};
-    
+    use super::mcp::required_str;
+
     eprintln!(
         "Ariadne MCP-style JSON loop ready. Send {{\"operation\":\"search\",\"params\":{{...}}}}."
     );
@@ -960,16 +1182,17 @@ pub fn cmd_mcp(db: &Path) -> Result<()> {
 
 /// Real stdio MCP server exposing Ariadne as one tool.
 pub fn cmd_mcp_server(db: &Path) -> Result<()> {
-    use super::mcp::{
-        ariadne_mcp_tool_schema, mcp_error, read_mcp_message, write_mcp_message,
-    };
-    
+    use super::mcp::{ariadne_mcp_tool_schema, mcp_error, read_mcp_message, write_mcp_message};
+
     let stdin = std::io::stdin();
     let mut reader = std::io::BufReader::new(stdin.lock());
     let mut stdout = std::io::stdout();
     while let Some(message) = read_mcp_message(&mut reader)? {
         let request: serde_json::Value = serde_json::from_str(&message)?;
-        let method = request.get("method").and_then(serde_json::Value::as_str).unwrap_or("");
+        let method = request
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         let id = request.get("id").cloned();
 
         if method == "notifications/initialized" {
@@ -993,12 +1216,15 @@ pub fn cmd_mcp_server(db: &Path) -> Result<()> {
             }),
             "tools/call" => {
                 let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-                let name = params.get("name").and_then(serde_json::Value::as_str).unwrap_or("");
+                let name = params
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 let args = params
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                if name != "ariadne" {
+                if name != "graph" {
                     mcp_error(id, -32602, "unknown tool")
                 } else {
                     let operation = args
@@ -1030,8 +1256,8 @@ pub fn cmd_mcp_server(db: &Path) -> Result<()> {
 
 /// Top-ranked nodes by PageRank.
 pub fn cmd_god_nodes(db: &Path, top: usize, seed: Option<&str>) -> Result<()> {
-    use ariadne_graph::query::{personalized_pagerank, pagerank};
-    
+    use ariadne_graph::query::{pagerank, personalized_pagerank};
+
     let store = Store::open(db)?;
     let graph = store.load()?;
     let ranks = if let Some(seed) = seed {
@@ -1050,7 +1276,16 @@ pub fn cmd_god_nodes(db: &Path, top: usize, seed: Option<&str>) -> Result<()> {
     } else {
         println!("top {} god-nodes by weighted pagerank:", top);
     }
-    for (id, rank) in sorted.iter().take(top) {
+    for (id, rank) in sorted
+        .iter()
+        .filter(|(id, _)| {
+            graph
+                .node(**id)
+                .map(|n| !ariadne_graph::query::is_rank_noise(n))
+                .unwrap_or(false)
+        })
+        .take(top)
+    {
         if let Some(n) = graph.node(**id) {
             println!("  {:.6}  {}  ({:?})", rank, n.qualified_name, n.kind);
         }
@@ -1058,17 +1293,18 @@ pub fn cmd_god_nodes(db: &Path, top: usize, seed: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Detect communities with Louvain or Leiden-style refinement.
+/// Detect communities with Louvain, Leiden, or Infomap.
 pub fn cmd_communities(db: &Path, top: usize, algorithm: &str) -> Result<()> {
-    use ariadne_graph::query::{leiden, louvain};
-    
+    use ariadne_graph::query::{infomap, leiden, louvain};
+
     let store = Store::open(db)?;
     let graph = store.load()?;
     let comm = match algorithm {
         "louvain" => louvain(&graph),
         "leiden" => leiden(&graph),
+        "infomap" => infomap(&graph),
         other => bail!(
-            "unknown community algorithm {}; use louvain or leiden",
+            "unknown community algorithm {}; use louvain, leiden, or infomap",
             other
         ),
     };
@@ -1096,6 +1332,64 @@ pub fn cmd_communities(db: &Path, top: usize, algorithm: &str) -> Result<()> {
             println!("    ... and {} more", members.len() - 5);
         }
     }
+    Ok(())
+}
+
+/// Deduplicate semantically equivalent concept/document nodes.
+pub fn cmd_dedup(
+    db: &Path,
+    threshold: f32,
+    community_boost: f32,
+    community_algo: Option<String>,
+) -> Result<()> {
+    use ariadne_graph::query::{deduplicate_nodes, DedupOptions};
+
+    let mut store = Store::open(db)?;
+    let graph = store.load()?;
+
+    let options = DedupOptions {
+        jw_threshold: threshold,
+        community_boost,
+        ..Default::default()
+    };
+
+    let communities = if let Some(algo) = community_algo {
+        match algo.as_str() {
+            "louvain" => {
+                let comm = ariadne_graph::query::louvain(&graph);
+                Some(comm)
+            }
+            "leiden" => {
+                let comm = ariadne_graph::query::leiden(&graph);
+                Some(comm)
+            }
+            _ => {
+                println!(
+                    "unknown algorithm {}; running without community boost",
+                    algo
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut mutable_graph = graph;
+    let result = deduplicate_nodes(
+        &mut mutable_graph,
+        &communities.unwrap_or_default(),
+        Some(options),
+    );
+
+    println!(
+        "dedup: {} candidates examined, {} merges, {} nodes removed, {} edges re-wired",
+        result.candidates_examined, result.merges, result.nodes_removed, result.edges_rewired
+    );
+
+    // Save the deduplicated graph back
+    store.save(&mutable_graph)?;
+
     Ok(())
 }
 
@@ -1183,5 +1477,147 @@ pub fn cmd_search(db: &Path, query: &str) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+/// Compact summary of changed files, symbols, and impacted nodes.
+pub fn cmd_blast_radius(db: &Path, base: &str, max_depth: usize, top: usize) -> Result<()> {
+    let analysis = detect_changes_json(db, base, max_depth)?;
+    let risk = analysis
+        .get("risk")
+        .and_then(|r| r.as_str())
+        .unwrap_or("unknown");
+    let risk_score = analysis
+        .get("risk_score")
+        .and_then(|r| r.as_f64())
+        .unwrap_or(0.0);
+    let changed_files_arr = analysis["changed_files"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let changed_files: Vec<&str> = changed_files_arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .take(top)
+        .collect();
+    let changed_symbols_arr = analysis["changed_symbols"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let changed_symbols: Vec<(&str, &str)> = changed_symbols_arr
+        .iter()
+        .filter_map(|v| {
+            Some((
+                v.get("qualified_name").and_then(|n| n.as_str())?,
+                v.get("kind").and_then(|k| k.as_str()).unwrap_or("?"),
+            ))
+        })
+        .take(top)
+        .collect();
+    let impacted_arr = analysis["impacted"].as_array().cloned().unwrap_or_default();
+    let impacted: Vec<(&str, f64)> = impacted_arr
+        .iter()
+        .filter_map(|v| {
+            Some((
+                v.get("qualified_name").and_then(|n| n.as_str())?,
+                v.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0),
+            ))
+        })
+        .take(top)
+        .collect();
+    let test_cov = analysis
+        .get("test_coverage")
+        .cloned()
+        .unwrap_or_else(|| json!({"covered": [], "missing": [], "missing_count": 0}));
+    let missing_count = test_cov
+        .get("missing_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    println!("blast radius: {} ({:.2})", risk, risk_score);
+    println!("changed files ({}):", changed_files.len());
+    for f in &changed_files {
+        println!("  {}", f);
+    }
+    println!("changed symbols ({}):", changed_symbols.len());
+    for (name, kind) in &changed_symbols {
+        println!("  {} ({})", name, kind);
+    }
+    println!("impacted nodes ({}):", impacted.len());
+    for (name, score) in &impacted {
+        println!("  {:.3}  {}", score, name);
+    }
+    println!("test coverage: {} missing", missing_count);
+    Ok(())
+}
+
+/// Report test coverage for changed symbols or a specific target.
+pub fn cmd_test_coverage(db: &Path, base: Option<&str>, target: Option<&str>) -> Result<()> {
+    use ariadne_graph::EdgeKind;
+
+    let result = match (base, target) {
+        (Some(base), _) => {
+            let analysis = detect_changes_json(db, base, 2)?;
+            analysis
+                .get("test_coverage")
+                .cloned()
+                .unwrap_or_else(|| json!({"covered": [], "missing": [], "missing_count": 0}))
+        }
+        (_, Some(target)) => {
+            let store = Store::open(db)?;
+            let graph = store.load()?;
+            let seed = super::helpers::resolve(&graph, target)?;
+            let mut covered = Vec::new();
+            let mut missing = Vec::new();
+            if let Some(node) = graph.node(seed) {
+                if matches!(
+                    node.kind,
+                    ariadne_graph::NodeKind::Function | ariadne_graph::NodeKind::Method
+                ) {
+                    let tests: Vec<Value> = graph
+                        .out_neighbors(seed)
+                        .filter(|(_, edge)| edge.kind == EdgeKind::TestedBy)
+                        .filter_map(|(test_id, _)| {
+                            graph.node(test_id).map(|t| {
+                                json!({
+                                    "id": test_id.0,
+                                    "qualified_name": t.qualified_name,
+                                    "source_uri": t.source_uri,
+                                })
+                            })
+                        })
+                        .collect();
+                    let entry = json!({
+                        "id": seed.0,
+                        "qualified_name": node.qualified_name,
+                        "kind": node.kind,
+                        "source_uri": node.source_uri,
+                        "tests": tests,
+                    });
+                    if tests.is_empty() {
+                        missing.push(entry);
+                    } else {
+                        covered.push(entry);
+                    }
+                }
+            }
+            json!({
+                "target": target,
+                "covered": covered,
+                "missing": missing,
+                "missing_count": missing.len(),
+            })
+        }
+        _ => json!({"covered": [], "missing": [], "missing_count": 0}),
+    };
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+/// Write a Markdown report to a file.
+pub fn cmd_report(db: &Path, output: &str, top: usize) -> Result<()> {
+    let markdown = generate_report_markdown(db, top)?;
+    std::fs::write(output, markdown)?;
+    println!("report written to {}", output);
     Ok(())
 }

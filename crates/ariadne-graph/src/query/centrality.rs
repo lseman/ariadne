@@ -108,10 +108,35 @@ fn edge_weight(kind: EdgeKind) -> f32 {
     }
 }
 
+/// True for nodes that inflate god-node rankings without representing a
+/// real symbol: file containers (high degree purely from `Defines`
+/// edges), synthetic flow and hyperedge nodes, and unresolved call
+/// placeholders.
+pub fn is_rank_noise(node: &crate::core::Node) -> bool {
+    matches!(
+        node.kind,
+        crate::core::NodeKind::File
+            | crate::core::NodeKind::Flow
+            | crate::core::NodeKind::Hyperedge
+    ) || node.qualified_name.starts_with("call::")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{Edge, EdgeKind, Node, NodeKind};
+
+    #[test]
+    fn rank_noise_filters_files_flows_and_placeholders() {
+        assert!(is_rank_noise(&Node::new(
+            NodeKind::File,
+            "file::src/lib.rs"
+        )));
+        assert!(is_rank_noise(&Node::new(NodeKind::Flow, "flow::main")));
+        assert!(is_rank_noise(&Node::new(NodeKind::Function, "call::len")));
+        assert!(!is_rank_noise(&Node::new(NodeKind::Function, "src::login")));
+        assert!(!is_rank_noise(&Node::new(NodeKind::Class, "src::Auth")));
+    }
 
     #[test]
     fn pagerank_concentrates_on_sinks() {

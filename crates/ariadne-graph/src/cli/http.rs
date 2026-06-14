@@ -61,8 +61,8 @@ fn write_not_found(stream: &mut TcpStream) -> anyhow::Result<()> {
 
 /// Graph API endpoint.
 fn graph_json(db: &Path, algorithm: &str, request_path: &str) -> anyhow::Result<String> {
-    use ariadne_graph::query::{leiden, louvain};
-    
+    use ariadne_graph::query::{infomap, leiden, louvain};
+
     let store = Store::open(db)?;
     let graph = store.load()?;
     let node_offset = query_usize(request_path, "offset").unwrap_or(0);
@@ -75,7 +75,7 @@ fn graph_json(db: &Path, algorithm: &str, request_path: &str) -> anyhow::Result<
         .clamp(1, 10000);
     let communities = match algorithm {
         "louvain" => louvain(&graph),
-        "leiden" => leiden(&graph),
+        "infomap" => infomap(&graph),
         _ => leiden(&graph),
     };
     let all_nodes: Vec<_> = graph
@@ -125,7 +125,7 @@ fn graph_json(db: &Path, algorithm: &str, request_path: &str) -> anyhow::Result<
 /// Search API endpoint.
 fn search_json(db: &Path, query: &str, request_path: &str) -> anyhow::Result<String> {
     use ariadne_graph::query::ranked_search;
-    
+
     let store = Store::open(db)?;
     let graph = store.load()?;
     let offset = query_usize(request_path, "offset").unwrap_or(0);
@@ -161,14 +161,23 @@ fn search_json(db: &Path, query: &str, request_path: &str) -> anyhow::Result<Str
 }
 
 /// Paged values.
-fn paged_values(values: &[serde_json::Value], offset: usize, limit: usize) -> Vec<serde_json::Value> {
+fn paged_values(
+    values: &[serde_json::Value],
+    offset: usize,
+    limit: usize,
+) -> Vec<serde_json::Value> {
     let start = offset.min(values.len());
     let end = (start + limit).min(values.len());
     values[start..end].to_vec()
 }
 
 /// Pagination JSON.
-fn pagination_json(offset: usize, limit: usize, returned: usize, total: usize) -> serde_json::Value {
+fn pagination_json(
+    offset: usize,
+    limit: usize,
+    returned: usize,
+    total: usize,
+) -> serde_json::Value {
     json!({
         "offset": offset,
         "limit": limit,

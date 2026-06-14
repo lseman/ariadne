@@ -18,12 +18,19 @@ fn fixtures_path() -> PathBuf {
 /// Build a graph from the sample fixture files and return the graph + store.
 fn build_test_graph() -> (Graph, Store) {
     let fixture = fixtures_path();
-    assert!(fixture.is_dir(), "fixtures directory missing at {}", fixture.display());
+    assert!(
+        fixture.is_dir(),
+        "fixtures directory missing at {}",
+        fixture.display()
+    );
 
     let mut graph = Graph::new();
 
     // Extract all supported files.
-    for entry in walkdir::WalkDir::new(fixture).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(fixture)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         let path = entry.path();
         if !is_supported(path) {
             continue;
@@ -49,8 +56,10 @@ fn graph_contains_rust_and_python_nodes() {
     let (graph, _) = build_test_graph();
 
     // Count nodes by kind.
-    let kind_counts: std::collections::HashMap<NodeKind, usize> =
-        graph.nodes().map(|(_, n)| n.kind).fold(std::collections::HashMap::new(), |mut acc, k| {
+    let kind_counts: std::collections::HashMap<NodeKind, usize> = graph
+        .nodes()
+        .map(|(_, n)| n.kind)
+        .fold(std::collections::HashMap::new(), |mut acc, k| {
             *acc.entry(k).or_insert(0) += 1;
             acc
         });
@@ -67,7 +76,9 @@ fn graph_contains_rust_and_python_nodes() {
         kind_counts
     );
     assert!(
-        kind_counts.get(&NodeKind::Function).is_some_and(|c| *c >= 1),
+        kind_counts
+            .get(&NodeKind::Function)
+            .is_some_and(|c| *c >= 1),
         "expected at least 1 Function node, got {:?}",
         kind_counts
     );
@@ -84,19 +95,31 @@ fn rust_file_has_expected_structure() {
 
     // Calculator struct should exist (Rust extractor uses file::<path>::Name).
     assert!(
-        graph.find_by_qname("file::/data/dev/ariadne/crates/ariadne-graph/tests/fixtures/sample.rs::Calculator").is_some(),
+        graph
+            .find_by_qname(
+                "file::/data/dev/ariadne/crates/ariadne-graph/tests/fixtures/sample.rs::Calculator"
+            )
+            .is_some(),
         "Calculator class not found"
     );
 
     // square function should exist.
     assert!(
-        graph.find_by_qname("file::/data/dev/ariadne/crates/ariadne-graph/tests/fixtures/sample.rs::square").is_some(),
+        graph
+            .find_by_qname(
+                "file::/data/dev/ariadne/crates/ariadne-graph/tests/fixtures/sample.rs::square"
+            )
+            .is_some(),
         "square function not found"
     );
 
     // sqrt function should exist.
     assert!(
-        graph.find_by_qname("file::/data/dev/ariadne/crates/ariadne-graph/tests/fixtures/sample.rs::sqrt").is_some(),
+        graph
+            .find_by_qname(
+                "file::/data/dev/ariadne/crates/ariadne-graph/tests/fixtures/sample.rs::sqrt"
+            )
+            .is_some(),
         "sqrt function not found"
     );
 }
@@ -125,7 +148,11 @@ fn python_file_has_expected_structure() {
 
     // main function should exist.
     assert!(
-        graph.find_by_qname("file::/data/dev/ariadne/crates/ariadne-graph/tests/fixtures/sample.py::main").is_some(),
+        graph
+            .find_by_qname(
+                "file::/data/dev/ariadne/crates/ariadne-graph/tests/fixtures/sample.py::main"
+            )
+            .is_some(),
         "main function not found"
     );
 }
@@ -135,8 +162,11 @@ fn call_edges_exist_between_defined_nodes() {
     let (graph, _) = build_test_graph();
 
     // Calculator::new should have a Defines edge from the File node.
-    let calc_new_qname = "file::/data/dev/ariadne/crates/ariadne-graph/tests/fixtures/sample.rs::Calculator::new";
-    let calc_new_id = graph.find_by_qname(calc_new_qname).expect("Calculator::new not found");
+    let calc_new_qname =
+        "file::/data/dev/ariadne/crates/ariadne-graph/tests/fixtures/sample.rs::Calculator::new";
+    let calc_new_id = graph
+        .find_by_qname(calc_new_qname)
+        .expect("Calculator::new not found");
 
     // The file node should define it. Pick sample.rs specifically — the
     // walk also produces a sample.py File node, and which comes first is
@@ -148,7 +178,9 @@ fn call_edges_exist_between_defined_nodes() {
         .expect("sample.rs file node not found");
 
     assert!(
-        graph.edges().any(|(_, s, d, e)| s == file_id && d == calc_new_id && e.kind == EdgeKind::Defines),
+        graph
+            .edges()
+            .any(|(_, s, d, e)| s == file_id && d == calc_new_id && e.kind == EdgeKind::Defines),
         "File should have a Defines edge to Calculator::new"
     );
 }
@@ -173,9 +205,7 @@ fn flows_are_materialised() {
     );
 
     // Verify at least one Flow node has the expected properties.
-    let first_flow = graph
-        .nodes()
-        .find(|(_, n)| n.kind == NodeKind::Flow);
+    let first_flow = graph.nodes().find(|(_, n)| n.kind == NodeKind::Flow);
     if let Some((_, flow_node)) = first_flow {
         assert!(
             flow_node.properties.contains_key("criticality"),
@@ -221,9 +251,9 @@ fn search_returns_results_for_rust_and_python_symbols() {
         "search for 'Calculator' returned no results"
     );
     assert!(
-        rust_hits.iter().any(|h| graph.node(h.id).is_some_and(|n| {
-            n.qualified_name.contains("Calculator")
-        })),
+        rust_hits.iter().any(|h| graph
+            .node(h.id)
+            .is_some_and(|n| { n.qualified_name.contains("Calculator") })),
         "Calculator hit not found in search results"
     );
 
@@ -239,7 +269,9 @@ fn search_returns_results_for_rust_and_python_symbols() {
 fn fts_search_returns_results_from_persistence() {
     let (_graph, store) = build_test_graph();
 
-    let hits = store.fts_search("Calculator", 10).expect("fts_search failed");
+    let hits = store
+        .fts_search("Calculator", 10)
+        .expect("fts_search failed");
     assert!(
         !hits.is_empty(),
         "FTS search for 'Calculator' returned no results"
@@ -270,7 +302,8 @@ fn edges_have_confidence_extracted() {
     let extracted_count = graph
         .edges()
         .filter(|(_, _, _, e)| {
-            e.kind == EdgeKind::Defines && matches!(e.confidence, ariadne_graph::core::Confidence::Extracted)
+            e.kind == EdgeKind::Defines
+                && matches!(e.confidence, ariadne_graph::core::Confidence::Extracted)
         })
         .count();
 

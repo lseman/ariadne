@@ -105,11 +105,11 @@ impl NamePattern {
             Self::Contains(pat) => name.to_lowercase().contains(&pat.to_lowercase()),
             Self::Glob(pat) => {
                 let regex = glob_to_regex(pat);
-                Regex::new(&regex).map(|r| r.is_match(name)).unwrap_or(false)
+                Regex::new(&regex)
+                    .map(|r| r.is_match(name))
+                    .unwrap_or(false)
             }
-            Self::Regex(pat) => {
-                Regex::new(pat).map(|r| r.is_match(name)).unwrap_or(false)
-            }
+            Self::Regex(pat) => Regex::new(pat).map(|r| r.is_match(name)).unwrap_or(false),
         }
     }
 }
@@ -121,8 +121,8 @@ fn glob_to_regex(pat: &str) -> String {
     for ch in pat.chars() {
         match ch {
             '*' => out.push_str("[^:]*"),
-            '.' | '(' | ')' | '+' | '?' | '[' | ']' | '{' | '}' | '|' | '\\'
-            | '^' | '$' | '#' | '@' => {
+            '.' | '(' | ')' | '+' | '?' | '[' | ']' | '{' | '}' | '|' | '\\' | '^' | '$' | '#'
+            | '@' => {
                 out.push('\\');
                 out.push(ch);
             }
@@ -182,7 +182,10 @@ impl Motif {
         }
         for e in &self.edges {
             if !node_ids.contains(&e.from) {
-                return Err(format!("edge from node {} not found in motif nodes", e.from));
+                return Err(format!(
+                    "edge from node {} not found in motif nodes",
+                    e.from
+                ));
             }
             if !node_ids.contains(&e.to) {
                 return Err(format!("edge to node {} not found in motif nodes", e.to));
@@ -290,10 +293,10 @@ pub fn security_audit_motif() -> Motif {
 /// parent classes, both inheriting from the same grandparent.
 pub fn diamond_inheritance_motif() -> Motif {
     Motif::builder()
-        .add_node(|n| n.kind(NodeKind::Class))   // child
-        .add_node(|n| n.kind(NodeKind::Class))   // parent 1
-        .add_node(|n| n.kind(NodeKind::Class))   // parent 2
-        .add_node(|n| n.kind(NodeKind::Class))   // grandparent
+        .add_node(|n| n.kind(NodeKind::Class)) // child
+        .add_node(|n| n.kind(NodeKind::Class)) // parent 1
+        .add_node(|n| n.kind(NodeKind::Class)) // parent 2
+        .add_node(|n| n.kind(NodeKind::Class)) // grandparent
         .add_edge(1, 3, EdgeKind::Inherits)
         .add_edge(2, 3, EdgeKind::Inherits)
         .add_edge(0, 1, EdgeKind::Inherits)
@@ -416,7 +419,11 @@ fn backtrack(state: &mut SearchState, depth: usize) {
                     let src_node = state.graph.node(src_id)?;
                     let dst_node = state.graph.node(dst_id)?;
                     let kind_str = format!("{:?}", e.kind);
-                    Some((src_node.qualified_name.clone(), kind_str, dst_node.qualified_name.clone()))
+                    Some((
+                        src_node.qualified_name.clone(),
+                        kind_str,
+                        dst_node.qualified_name.clone(),
+                    ))
                 })
                 .collect();
             state.results.push(MotifMatch {
@@ -429,8 +436,7 @@ fn backtrack(state: &mut SearchState, depth: usize) {
 
     let pattern_node_idx = depth;
     // Collect candidate ids into an owned Vec to avoid borrow conflicts.
-    let candidate_ids: Vec<NodeId> = state
-        .candidate_sets[pattern_node_idx]
+    let candidate_ids: Vec<NodeId> = state.candidate_sets[pattern_node_idx]
         .iter()
         .map(|(id, _)| *id)
         .collect();
@@ -496,11 +502,7 @@ fn check_consistency(
 }
 
 /// Validate that all motif edges exist in the graph for the current mapping.
-fn validate_edges(
-    graph: &Graph,
-    motif: &Motif,
-    current_map: &HashMap<usize, NodeId>,
-) -> bool {
+fn validate_edges(graph: &Graph, motif: &Motif, current_map: &HashMap<usize, NodeId>) -> bool {
     for e in &motif.edges {
         let src_id = match current_map.get(&e.from) {
             Some(id) => *id,
@@ -580,7 +582,11 @@ mod tests {
             .build();
 
         let matches = find_motifs(&g, &motif, 10);
-        assert_eq!(matches.len(), 1, "should find exactly one 3-node chain a→b→c");
+        assert_eq!(
+            matches.len(),
+            1,
+            "should find exactly one 3-node chain a→b→c"
+        );
         let m = &matches[0];
         assert_eq!(m.node_map.len(), 3);
         assert_eq!(m.edges.len(), 2);
@@ -600,7 +606,11 @@ mod tests {
             .build();
 
         let matches = find_motifs(&g, &motif, 10);
-        assert_eq!(matches.len(), 1, "should match when first node is named exactly 'foo'");
+        assert_eq!(
+            matches.len(),
+            1,
+            "should match when first node is named exactly 'foo'"
+        );
     }
 
     #[test]
@@ -641,8 +651,14 @@ mod tests {
     fn motif_validation_rejects_duplicate_ids() {
         let motif = Motif {
             nodes: vec![
-                MotifNode { id: 0, ..Default::default() },
-                MotifNode { id: 0, ..Default::default() },
+                MotifNode {
+                    id: 0,
+                    ..Default::default()
+                },
+                MotifNode {
+                    id: 0,
+                    ..Default::default()
+                },
             ],
             edges: vec![],
         };
@@ -726,14 +742,14 @@ mod tests {
         // Note: Inherits edges go from child to parent in Ariadne (child -[Inherits]-> parent).
         // So we need to reverse the edges.
         let motif = Motif::builder()
-            .add_node(|n| n.kind(NodeKind::Class))   // child
-            .add_node(|n| n.kind(NodeKind::Class))   // parent 1
-            .add_node(|n| n.kind(NodeKind::Class))   // parent 2
-            .add_node(|n| n.kind(NodeKind::Class))   // grandparent
-            .add_edge(1, 3, EdgeKind::Inherits)  // parent1 → grandparent
-            .add_edge(2, 3, EdgeKind::Inherits)  // parent2 → grandparent
-            .add_edge(0, 1, EdgeKind::Inherits)  // child → parent1
-            .add_edge(0, 2, EdgeKind::Inherits)  // child → parent2
+            .add_node(|n| n.kind(NodeKind::Class)) // child
+            .add_node(|n| n.kind(NodeKind::Class)) // parent 1
+            .add_node(|n| n.kind(NodeKind::Class)) // parent 2
+            .add_node(|n| n.kind(NodeKind::Class)) // grandparent
+            .add_edge(1, 3, EdgeKind::Inherits) // parent1 → grandparent
+            .add_edge(2, 3, EdgeKind::Inherits) // parent2 → grandparent
+            .add_edge(0, 1, EdgeKind::Inherits) // child → parent1
+            .add_edge(0, 2, EdgeKind::Inherits) // child → parent2
             .build();
 
         let matches = find_motifs(&g, &motif, 10);

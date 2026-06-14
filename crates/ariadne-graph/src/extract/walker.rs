@@ -71,10 +71,14 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
     match path.extension().and_then(|s| s.to_str()) {
         Some("rs") => super::ast::rust::extract_file(path, graph),
         Some("py") => super::ast::python::extract_file(path, graph),
+        Some("ts") | Some("tsx") | Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => {
+            super::ast::typescript::extract_file(path, graph)
+        }
         Some("c") | Some("cc") | Some("cpp") | Some("cxx") | Some("h") | Some("hh")
         | Some("hpp") | Some("hxx") => super::ast::cpp::extract_file(path, graph),
         Some("md") | Some("markdown") => super::concept::markdown::extract_file(path, graph),
         Some("tex") => super::concept::latex::extract_file(path, graph),
+        Some("html") | Some("htm") => super::concept::html::extract_file(path, graph),
         Some("svg") => super::vision::svg::extract_file(path, graph),
         _ => Ok(()),
     }
@@ -85,6 +89,12 @@ pub fn is_supported(path: &Path) -> bool {
         path.extension().and_then(|s| s.to_str()),
         Some(
             "rs" | "py"
+                | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "mjs"
+                | "cjs"
                 | "c"
                 | "cc"
                 | "cpp"
@@ -96,12 +106,46 @@ pub fn is_supported(path: &Path) -> bool {
                 | "md"
                 | "markdown"
                 | "tex"
+                | "html"
+                | "htm"
                 | "svg"
         )
     )
 }
 
-pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
+/// True when a filesystem event on `path` could change the graph: the
+/// file is a supported source type, no component under `root` is a
+/// default-ignored directory, and the ignore set does not match.
+///
+/// Unlike directory walking — where `filter_entry` prunes ignored
+/// directories before descending — event paths arrive fully formed, so
+/// every intermediate component must be checked.
+pub fn is_relevant_source(root: &Path, path: &Path, ignore: &IgnoreSet) -> bool {
+    if !is_supported(path) {
+        return false;
+    }
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let ignored_component = rel.components().any(|c| match c {
+        std::path::Component::Normal(name) => default_ignored_name(&name.to_string_lossy()),
+        _ => false,
+    });
+    !ignored_component && !ignore.is_ignored(path)
+}
+
+/// The module name a source file answers to in import paths: its stem,
+/// or the parent directory for container files (`mod.rs`, `index.ts`,
+/// `__init__.py`, …).
+fn module_stem(uri: &str) -> Option<String> {
+    let path = Path::new(uri);
+    let stem = path.file_stem()?.to_str()?;
+    if matches!(stem, "mod" | "index" | "__init__" | "lib" | "main") {
+        path.parent()?.file_name()?.to_str().map(|s| s.to_string())
+    } else {
+        Some(stem.to_string())
+    }
+}
+
+fn build_by_name(graph: &Graph) -> HashMap<String, Vec<crate::core::NodeId>> {
     let mut by_name: HashMap<String, Vec<_>> = HashMap::new();
     for (id, node) in graph.nodes() {
         if matches!(
@@ -112,6 +156,43 @@ pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
             by_name.entry(node.name.clone()).or_default().push(id);
         }
     }
+    by_name
+}
+
+// Identifier tokens from each file's import paths (`use crate::auth;`
+// → {crate, auth}, `from pkg.auth import login` → {pkg, auth},
+// `import './auth'` → {auth}), used by Tier 4 to prefer candidates
+// whose module the caller's file actually imports.
+fn build_import_tokens(graph: &Graph) -> HashMap<String, HashSet<String>> {
+    let mut import_tokens: HashMap<String, HashSet<String>> = HashMap::new();
+    for (_, src, dst, edge) in graph.edges() {
+        if edge.kind != EdgeKind::Imports {
+            continue;
+        }
+        let (Some(file), Some(module)) = (graph.node(src), graph.node(dst)) else {
+            continue;
+        };
+        let Some(uri) = file.source_uri.as_ref() else {
+            continue;
+        };
+        let Some(path) = module.qualified_name.strip_prefix("module::") else {
+            continue;
+        };
+        let tokens = import_tokens.entry(uri.clone()).or_default();
+        for token in path.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            if !token.is_empty() {
+                // Lowercased so `use foo::Graph` matches graph.rs — type
+                // names are typically the CamelCase of their module stem.
+                tokens.insert(token.to_ascii_lowercase());
+            }
+        }
+    }
+    import_tokens
+}
+
+pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
+    let by_name = build_by_name(graph);
+    let import_tokens = build_import_tokens(graph);
 
     let existing: HashSet<_> = graph
         .edges()
@@ -123,8 +204,12 @@ pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
     // analysis. A `false` confidence flag marks tiers that are inferred
     // rather than structural, so queries can still filter them out.
     let mut additions: Vec<(_, _, &'static str, bool)> = Vec::new();
+    // Placeholder edges made redundant by a resolution; removed after
+    // the additions land so the same call is not counted as both
+    // resolved and unresolved.
+    let mut stale_edges: Vec<crate::core::EdgeId> = Vec::new();
 
-    for (_, src, dst, edge) in graph.edges() {
+    for (edge_id, src, dst, edge) in graph.edges() {
         if edge.kind != EdgeKind::Calls {
             continue;
         }
@@ -143,6 +228,7 @@ pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
 
         // Tier 1: exactly one candidate in the whole graph.
         if candidates.len() == 1 {
+            stale_edges.push(edge_id);
             if !existing.contains(&(src, candidates[0])) {
                 additions.push((src, candidates[0], "unique_name", true));
             }
@@ -166,6 +252,7 @@ pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
                 .copied()
                 .collect();
             if local.len() == 1 {
+                stale_edges.push(edge_id);
                 if !existing.contains(&(src, local[0])) {
                     additions.push((src, local[0], "file_local", true));
                 }
@@ -188,8 +275,38 @@ pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
                 })
                 .copied()
                 .collect();
-            if scoped.len() == 1 && !existing.contains(&(src, scoped[0])) {
-                additions.push((src, scoped[0], "scoped", false));
+            if scoped.len() == 1 {
+                stale_edges.push(edge_id);
+                if !existing.contains(&(src, scoped[0])) {
+                    additions.push((src, scoped[0], "scoped", false));
+                }
+                continue;
+            }
+        }
+
+        // Tier 4: exactly one candidate lives in a module the caller's
+        // file imports (matched by file stem against import-path
+        // tokens). Inferred — import-path → file mapping is heuristic.
+        if let Some(src_file) = src_file.as_ref() {
+            if let Some(tokens) = import_tokens.get(src_file.as_str()) {
+                let imported: Vec<_> = candidates
+                    .iter()
+                    .filter(|&&cand| {
+                        graph
+                            .node(cand)
+                            .and_then(|n| n.source_uri.as_deref())
+                            .and_then(module_stem)
+                            .map(|stem| tokens.contains(&stem.to_ascii_lowercase()))
+                            .unwrap_or(false)
+                    })
+                    .copied()
+                    .collect();
+                if imported.len() == 1 {
+                    stale_edges.push(edge_id);
+                    if !existing.contains(&(src, imported[0])) {
+                        additions.push((src, imported[0], "import_scoped", false));
+                    }
+                }
             }
         }
     }
@@ -206,6 +323,23 @@ pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
             serde_json::Value::String(format!("call_placeholder::{}", tag)),
         );
         graph.add_edge(src, dst, edge);
+    }
+
+    // A resolved call must not also be counted as unresolved: drop the
+    // redundant placeholder edges, then any `call::` nodes left with no
+    // edges at all.
+    graph.remove_edges_by_id(&stale_edges);
+    if !stale_edges.is_empty() {
+        let orphaned: Vec<_> = graph
+            .nodes()
+            .filter(|(id, n)| {
+                n.qualified_name.starts_with("call::")
+                    && graph.in_neighbors(*id).next().is_none()
+                    && graph.out_neighbors(*id).next().is_none()
+            })
+            .map(|(id, _)| id)
+            .collect();
+        graph.remove_nodes_by_id(&orphaned);
     }
     count
 }
@@ -260,31 +394,60 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "zip"
             // Rust/std/common fluent API calls that otherwise dominate
             // unresolved call nodes.
+            | "and_then"
+            | "as_bytes"
+            | "as_deref"
             | "as_ref"
             | "as_str"
+            | "chars"
             | "clone"
+            | "cloned"
             | "collect"
             | "contains"
+            | "copied"
             | "count"
             | "default"
+            | "ends_with"
+            | "entry"
+            | "err"
             | "expect"
+            | "extend"
+            | "filter_map"
             | "find"
             | "first"
+            | "flat_map"
+            | "fold"
             | "from"
             | "get"
             | "insert"
             | "into"
+            | "into_iter"
             | "is_empty"
+            | "iter_mut"
+            | "join"
             | "last"
+            | "map_err"
             | "new"
+            | "none"
             | "ok"
+            | "ok_or"
+            | "ok_or_else"
             | "or_default"
+            | "position"
             | "push"
             | "push_str"
+            | "some"
+            | "split"
+            | "splitn"
+            | "starts_with"
+            | "take"
+            | "to_owned"
             | "to_string"
+            | "trim"
             | "unwrap"
             | "unwrap_or"
             | "unwrap_or_default"
+            | "unwrap_or_else"
             | "with_capacity"
             // C/C++ and libc-style calls.
             | "malloc"
@@ -446,6 +609,107 @@ mod tests {
                 .nodes()
                 .all(|(_, n)| !n.qualified_name.ends_with("::noisy")),
             ".ariadneignore entries should be excluded from extraction"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn relevance_filters_event_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "ariadne_relevance_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "src/gen.rs\n").unwrap();
+        let ignore = IgnoreSet::load(&dir);
+
+        assert!(is_relevant_source(&dir, &dir.join("src/lib.rs"), &ignore));
+        // Unsupported extensions: the db file and its WAL sibling must
+        // never trigger an update, or watch mode would loop on itself.
+        assert!(!is_relevant_source(&dir, &dir.join("ariadne.db"), &ignore));
+        assert!(!is_relevant_source(
+            &dir,
+            &dir.join("ariadne.db-wal"),
+            &ignore
+        ));
+        // Default-ignored directories anywhere in the relative path.
+        assert!(!is_relevant_source(
+            &dir,
+            &dir.join("target/debug/build.rs"),
+            &ignore
+        ));
+        assert!(!is_relevant_source(
+            &dir,
+            &dir.join(".git/objects/aa/bb.rs"),
+            &ignore
+        ));
+        assert!(!is_relevant_source(
+            &dir,
+            &dir.join("web/node_modules/x/index.js"),
+            &ignore
+        ));
+        // .gitignore entries apply to event paths too.
+        assert!(!is_relevant_source(&dir, &dir.join("src/gen.rs"), &ignore));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn extracts_plain_javascript_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "ariadne_js_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/app.js"),
+            "function greet(name) { return name; }\nfunction main() { greet('x'); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/view.jsx"),
+            "function View() { return <div>{greet('y')}</div>; }\n",
+        )
+        .unwrap();
+
+        let mut graph = Graph::new();
+        let count = extract_directory(&dir, &mut graph).unwrap();
+        assert_eq!(count, 2);
+
+        let greet = graph
+            .nodes()
+            .find(|(_, n)| {
+                n.qualified_name.ends_with("::greet") && !n.qualified_name.starts_with("call::")
+            })
+            .map(|(id, _)| id)
+            .expect("greet must be extracted from .js");
+        let main = graph
+            .nodes()
+            .find(|(_, n)| n.qualified_name.ends_with("app.js::main"))
+            .map(|(id, _)| id)
+            .expect("main must be extracted from .js");
+        assert!(
+            graph
+                .out_neighbors(main)
+                .any(|(dst, e)| e.kind == EdgeKind::Calls && dst == greet),
+            "call from main should resolve to greet"
+        );
+        assert!(
+            graph
+                .nodes()
+                .any(|(_, n)| n.qualified_name.ends_with("::View")),
+            "JSX component must be extracted via TSX grammar"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -720,6 +984,132 @@ pub fn entry_b() -> u32 { shared() }
             b_calls.contains(&shared_b) && !b_calls.contains(&shared_a),
             "entry_b should call b.rs::shared, not a.rs::shared (b_calls={:?})",
             b_calls
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolver_uses_imports_to_disambiguate() {
+        // Two files define `login`. The caller's file imports `pkg.auth`,
+        // so the call must resolve to auth.py's copy. Neither Tier 1
+        // (name not unique), Tier 2 (caller in a third file), nor Tier 3
+        // (unqualified call, no scope) can decide.
+        let mut g = Graph::new();
+        let mut caller_file = Node::new(NodeKind::File, "file::main.py");
+        caller_file.source_uri = Some("main.py".to_string());
+        let caller_file = g.add_node(caller_file);
+        let module = g.add_node(Node::new(NodeKind::Module, "module::pkg.auth"));
+        g.add_edge(caller_file, module, Edge::extracted(EdgeKind::Imports));
+
+        let mut caller = Node::new(NodeKind::Function, "main.py::entry");
+        caller.source_uri = Some("main.py".to_string());
+        let caller = g.add_node(caller);
+        let placeholder = g.add_node(Node::new(NodeKind::Function, "call::login"));
+        g.add_edge(caller, placeholder, Edge::ambiguous(EdgeKind::Calls));
+
+        let mut auth_login = Node::new(NodeKind::Function, "pkg/auth.py::login");
+        auth_login.source_uri = Some("pkg/auth.py".to_string());
+        let auth_login = g.add_node(auth_login);
+        let mut billing_login = Node::new(NodeKind::Function, "pkg/billing.py::login");
+        billing_login.source_uri = Some("pkg/billing.py".to_string());
+        let billing_login = g.add_node(billing_login);
+
+        let added = resolve_call_placeholders(&mut g);
+        assert_eq!(added, 1);
+        let resolved: Vec<_> = g
+            .out_neighbors(caller)
+            .filter(|(_, e)| e.kind == EdgeKind::Calls)
+            .map(|(dst, _)| dst)
+            .collect();
+        assert!(
+            resolved.contains(&auth_login) && !resolved.contains(&billing_login),
+            "import of pkg.auth must pick auth.py::login (resolved={:?})",
+            resolved
+        );
+        // The placeholder edge is redundant once resolved, and the
+        // orphaned placeholder node goes with it.
+        assert!(
+            !resolved.contains(&placeholder),
+            "redundant placeholder edge must be removed"
+        );
+        assert!(
+            g.node(placeholder).is_none(),
+            "orphaned placeholder node must be removed"
+        );
+    }
+
+    #[test]
+    fn module_stem_uses_parent_for_container_files() {
+        assert_eq!(module_stem("src/auth.rs").as_deref(), Some("auth"));
+        assert_eq!(module_stem("src/auth/mod.rs").as_deref(), Some("auth"));
+        assert_eq!(module_stem("pkg/auth/__init__.py").as_deref(), Some("auth"));
+        assert_eq!(module_stem("web/auth/index.ts").as_deref(), Some("auth"));
+    }
+
+    #[test]
+    fn rust_use_declaration_scopes_unqualified_call() {
+        // a.rs and b.rs both define `shared`. c.rs has `use crate::a::shared;`
+        // and calls it unqualified — Tier 4 must pick a.rs's copy from the
+        // use-declaration tokens.
+        let dir = std::env::temp_dir().join(format!(
+            "ariadne_import_scoped_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "pub fn shared() -> u32 { 1 }\n").unwrap();
+        std::fs::write(dir.join("src/b.rs"), "pub fn shared() -> u32 { 2 }\n").unwrap();
+        std::fs::write(
+            dir.join("src/c.rs"),
+            "use crate::a::shared;\npub fn entry() -> u32 { shared() }\n",
+        )
+        .unwrap();
+
+        let mut graph = Graph::new();
+        extract_directory(&dir, &mut graph).unwrap();
+
+        let entry = graph
+            .nodes()
+            .find(|(_, n)| n.qualified_name.ends_with("/c.rs::entry"))
+            .map(|(id, _)| id)
+            .expect("entry must be extracted");
+        let shared_a = graph
+            .nodes()
+            .find(|(_, n)| {
+                n.qualified_name.ends_with("/a.rs::shared")
+                    && !n.qualified_name.starts_with("call::")
+            })
+            .map(|(id, _)| id)
+            .expect("a.rs::shared must be extracted");
+        let shared_b = graph
+            .nodes()
+            .find(|(_, n)| {
+                n.qualified_name.ends_with("/b.rs::shared")
+                    && !n.qualified_name.starts_with("call::")
+            })
+            .map(|(id, _)| id)
+            .expect("b.rs::shared must be extracted");
+
+        let resolved: Vec<_> = graph
+            .out_neighbors(entry)
+            .filter(|(dst, e)| {
+                e.kind == EdgeKind::Calls
+                    && graph
+                        .node(*dst)
+                        .map(|n| !n.qualified_name.starts_with("call::"))
+                        .unwrap_or(false)
+            })
+            .map(|(dst, _)| dst)
+            .collect();
+        assert!(
+            resolved.contains(&shared_a) && !resolved.contains(&shared_b),
+            "use crate::a::shared must resolve to a.rs (resolved={:?})",
+            resolved
         );
 
         std::fs::remove_dir_all(&dir).ok();

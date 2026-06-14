@@ -34,10 +34,11 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
     let source = fs::read_to_string(path)?;
     let file_uri = path.to_string_lossy().to_string();
     let file_qn = format!("doc::{}", file_uri);
-    let file_id = graph.add_node(
-        Node::new(NodeKind::Document, &file_qn)
-            .with_source(file_uri.clone(), 0, source.lines().count() as u32),
-    );
+    let file_id = graph.add_node(Node::new(NodeKind::Document, &file_qn).with_source(
+        file_uri.clone(),
+        0,
+        source.lines().count() as u32,
+    ));
 
     // Build a reference map for reference-style links.
     let mut refs: HashMap<String, (String, Option<String>)> = HashMap::new();
@@ -74,20 +75,15 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
                     }
                 }
                 // The parent is now the top of the stack (or the document).
-                let parent = section_stack
-                    .last()
-                    .map(|(id, _)| *id)
-                    .unwrap_or(file_id);
+                let parent = section_stack.last().map(|(id, _)| *id).unwrap_or(file_id);
 
                 // Create the section node with a unique QN (counter ensures uniqueness).
                 let qn = format!("{}::section-{}", file_qn, heading_counter);
-                let section_id = graph.add_node(
-                    Node::new(NodeKind::Section, &qn).with_source(
-                        file_uri.clone(),
-                        0,
-                        0,
-                    ),
-                );
+                let section_id = graph.add_node(Node::new(NodeKind::Section, &qn).with_source(
+                    file_uri.clone(),
+                    0,
+                    0,
+                ));
                 heading_counter += 1;
                 graph.add_edge(parent, section_id, Edge::extracted(EdgeKind::Defines));
                 section_stack.push((section_id, level));
@@ -102,7 +98,18 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
                     } else {
                         format!("{}::{}", file_qn, slug)
                     };
-                    graph.rename_node(current_section_id, &new_qn, &slug);
+                    let effective_id = graph.rename_node(current_section_id, &new_qn, &slug);
+                    // A merge (duplicate heading slug) may have folded this
+                    // section into an earlier one; keep our cursors pointed
+                    // at the surviving node so child content attaches there.
+                    if effective_id != current_section_id {
+                        if let Some(top) = section_stack.last_mut() {
+                            if top.0 == current_section_id {
+                                top.0 = effective_id;
+                            }
+                        }
+                        current_section_id = effective_id;
+                    }
                 }
                 in_heading = false;
             }
@@ -131,7 +138,12 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
                     }
                 }
             }
-            Event::Start(Tag::Link { link_type, dest_url, title: _, id }) => {
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title: _,
+                id,
+            }) => {
                 match link_type {
                     pulldown_cmark::LinkType::Reference
                     | pulldown_cmark::LinkType::Collapsed
@@ -143,17 +155,32 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
                             dest_url.to_string()
                         };
                         // Try to extract a symbol name from the URL.
-                        extract_symbol_from_url(&target, graph, current_section_id, file_qn.as_str());
+                        extract_symbol_from_url(
+                            &target,
+                            graph,
+                            current_section_id,
+                            file_qn.as_str(),
+                        );
                     }
                     pulldown_cmark::LinkType::Inline => {
                         // Inline link — try to extract symbol from the URL.
-                        extract_symbol_from_url(&dest_url, graph, current_section_id, file_qn.as_str());
+                        extract_symbol_from_url(
+                            &dest_url,
+                            graph,
+                            current_section_id,
+                            file_qn.as_str(),
+                        );
                     }
                     pulldown_cmark::LinkType::Email => {
                         // Email link — extract local part as potential symbol.
                         let email = &dest_url;
                         if let Some(local_part) = email.strip_prefix("mailto:") {
-                            extract_symbol_from_url(local_part, graph, current_section_id, file_qn.as_str());
+                            extract_symbol_from_url(
+                                local_part,
+                                graph,
+                                current_section_id,
+                                file_qn.as_str(),
+                            );
                         }
                     }
                     pulldown_cmark::LinkType::ReferenceUnknown
@@ -170,7 +197,8 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
             Event::Start(Tag::TableCell) => {
                 // Table cells will have their text extracted.
             }
-            Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow)
+            Event::Start(Tag::TableHead)
+            | Event::Start(Tag::TableRow)
             | Event::Start(Tag::List(_))
             | Event::Start(Tag::Item)
             | Event::Start(Tag::Paragraph)
@@ -239,7 +267,8 @@ fn collect_reference_definitions(
                 } else {
                     // bare url ["title"] syntax
                     // Strip optional title in quotes, then take the URL as everything before it
-                    let url_end = after.find(|c: char| c.is_whitespace())
+                    let url_end = after
+                        .find(|c: char| c.is_whitespace())
                         .unwrap_or(after.len());
                     let url = &after[..url_end];
                     let rest_after = &after[url_end..];
@@ -257,21 +286,20 @@ fn collect_reference_definitions(
 fn parse_optional_title(s: &str) -> Option<String> {
     let trimmed = s.trim_start();
     if trimmed.starts_with('"') {
-        trimmed.strip_prefix('"').and_then(|after| after.rfind('"').map(|end| after[..end].to_string()))
+        trimmed
+            .strip_prefix('"')
+            .and_then(|after| after.rfind('"').map(|end| after[..end].to_string()))
     } else if trimmed.starts_with('\'') {
-        trimmed.strip_prefix('\'').and_then(|after| after.rfind('\'').map(|end| after[..end].to_string()))
+        trimmed
+            .strip_prefix('\'')
+            .and_then(|after| after.rfind('\'').map(|end| after[..end].to_string()))
     } else {
         None
     }
 }
 
 /// Extract symbol references from code block content.
-fn extract_symbols_from_code(
-    code: &str,
-    graph: &mut Graph,
-    section_id: NodeId,
-    _file_qn: &str,
-) {
+fn extract_symbols_from_code(code: &str, graph: &mut Graph, section_id: NodeId, _file_qn: &str) {
     // Split on word boundaries and try to resolve each token.
     for token in tokenize_code(code) {
         mention(graph, section_id, &token, 0.80);
@@ -279,12 +307,7 @@ fn extract_symbols_from_code(
 }
 
 /// Extract symbol references from a URL or link text.
-fn extract_symbol_from_url(
-    url: &str,
-    graph: &mut Graph,
-    section_id: NodeId,
-    _file_qn: &str,
-) {
+fn extract_symbol_from_url(url: &str, graph: &mut Graph, section_id: NodeId, _file_qn: &str) {
     // Handle fragment URLs like #authenticate — strip the leading #.
     let candidate = if let Some(stripped) = url.strip_prefix('#') {
         stripped
@@ -304,7 +327,9 @@ fn extract_symbol_from_url(
 
 /// Strip common file suffixes from a candidate name.
 fn strip_file_suffix(s: &str) -> &str {
-    let suffixes = [".html", ".md", ".txt", ".htm", ".php", ".js", ".ts", ".rs", ".py"];
+    let suffixes = [
+        ".html", ".md", ".txt", ".htm", ".php", ".js", ".ts", ".rs", ".py",
+    ];
     for suffix in &suffixes {
         if let Some(stripped) = s.strip_suffix(suffix) {
             return stripped;
@@ -346,7 +371,11 @@ fn mention(graph: &mut Graph, section_id: NodeId, token: &str, confidence: f32) 
         return;
     }
     if let Some(target) = resolve_symbol(graph, token) {
-        graph.add_edge(section_id, target, Edge::inferred(EdgeKind::Mentions, confidence));
+        graph.add_edge(
+            section_id,
+            target,
+            Edge::inferred(EdgeKind::Mentions, confidence),
+        );
         return;
     }
     if let Some(node) = graph.node_mut(section_id) {
@@ -376,7 +405,10 @@ pub fn resolve_mentions(graph: &mut Graph) -> usize {
                 .iter()
                 .filter_map(|v| {
                     let pair = v.as_array()?;
-                    Some((pair.first()?.as_str()?.to_string(), pair.get(1)?.as_f64()? as f32))
+                    Some((
+                        pair.first()?.as_str()?.to_string(),
+                        pair.get(1)?.as_f64()? as f32,
+                    ))
                 })
                 .collect();
             (!tokens.is_empty()).then_some((id, tokens))
@@ -396,7 +428,11 @@ pub fn resolve_mentions(graph: &mut Graph) -> usize {
                 if existing.contains(&(section_id, target)) {
                     continue;
                 }
-                graph.add_edge(section_id, target, Edge::inferred(EdgeKind::Mentions, confidence));
+                graph.add_edge(
+                    section_id,
+                    target,
+                    Edge::inferred(EdgeKind::Mentions, confidence),
+                );
                 added += 1;
             }
         }
@@ -518,8 +554,15 @@ More content.
         assert!(doc_id.is_some(), "Document node should exist");
 
         // Should have Section nodes.
-        let sections: Vec<_> = g.nodes().filter(|(_, n)| n.kind == NodeKind::Section).collect();
-        assert_eq!(sections.len(), 3, "should have 3 sections (title, section one, subsection)");
+        let sections: Vec<_> = g
+            .nodes()
+            .filter(|(_, n)| n.kind == NodeKind::Section)
+            .collect();
+        assert_eq!(
+            sections.len(),
+            3,
+            "should have 3 sections (title, section one, subsection)"
+        );
 
         // Document should define sections.
         let doc_id = doc_id.unwrap();
@@ -535,12 +578,40 @@ More content.
     }
 
     #[test]
+    fn duplicate_heading_slugs_merge_not_duplicate() {
+        // Two headings that slugify identically must not produce two
+        // Section nodes with the same qualified_name — otherwise persisting
+        // the graph hits a UNIQUE constraint on nodes.qualified_name.
+        let mut g = Graph::new();
+        let source = r#"# Doc
+
+## Constructor parameters
+
+First.
+
+## Constructor parameters
+
+Second.
+"#;
+        let path = Path::new("/tmp/ariadne_dup_heading_test.md");
+        std::fs::write(path, source).unwrap();
+        extract_file(path, &mut g).unwrap();
+        std::fs::remove_file(path).ok();
+
+        let qn = "doc::/tmp/ariadne_dup_heading_test.md::constructor-parameters";
+        let dupes: Vec<_> = g.nodes().filter(|(_, n)| n.qualified_name == qn).collect();
+        assert_eq!(
+            dupes.len(),
+            1,
+            "duplicate heading slugs must collapse to one node, got {}",
+            dupes.len()
+        );
+    }
+
+    #[test]
     fn extracts_inline_code_symbols() {
         let mut g = Graph::new();
-        let _file = g.add_node(Node::new(
-            NodeKind::File,
-            "src::lib.rs",
-        ));
+        let _file = g.add_node(Node::new(NodeKind::File, "src::lib.rs"));
         let func = g.add_node(Node::new(NodeKind::Function, "src::lib.rs::compute_hash"));
         g.add_node(Node::new(NodeKind::Function, "src::lib.rs::other"));
 
@@ -578,18 +649,28 @@ Use the `compute_hash` function to compute the hash.
         std::fs::remove_file(path).ok();
 
         // No edge yet — the symbol does not exist at extraction time.
-        let func = g.add_node(Node::new(NodeKind::Function, "src::pay.rs::process_payment"));
-        let before = g.in_neighbors(func).filter(|(_, e)| e.kind == EdgeKind::Mentions).count();
+        let func = g.add_node(Node::new(
+            NodeKind::Function,
+            "src::pay.rs::process_payment",
+        ));
+        let before = g
+            .in_neighbors(func)
+            .filter(|(_, e)| e.kind == EdgeKind::Mentions)
+            .count();
         assert_eq!(before, 0, "edge should not exist before the post-pass");
 
         let added = resolve_mentions(&mut g);
         assert_eq!(added, 1, "post-pass should add exactly one Mentions edge");
-        let after = g.in_neighbors(func).filter(|(_, e)| e.kind == EdgeKind::Mentions).count();
+        let after = g
+            .in_neighbors(func)
+            .filter(|(_, e)| e.kind == EdgeKind::Mentions)
+            .count();
         assert_eq!(after, 1, "post-pass should link the doc to the symbol");
 
         // pending_mentions markers are consumed, not left to persist.
         assert!(
-            g.nodes().all(|(_, n)| !n.properties.contains_key("pending_mentions")),
+            g.nodes()
+                .all(|(_, n)| !n.properties.contains_key("pending_mentions")),
             "pending_mentions must be cleared after the post-pass"
         );
         // Idempotent: a second pass adds nothing.
@@ -612,19 +693,11 @@ See [authentication docs][auth-ref].
         extract_file(path, &mut g).unwrap();
         std::fs::remove_file(path).ok();
 
-        eprintln!("DEBUG ref: node_count={}", g.node_count());
-        for (id, n) in g.nodes() {
-            eprintln!("DEBUG ref: node {:?} kind={:?} name={}", id, n.kind, n.name);
-        }
-        for (e_id, src, dst, e) in g.edges() {
-            eprintln!("DEBUG ref: edge {:?} {:?}->{:?} kind={:?}", e_id, src, dst, e.kind);
-        }
         // Should have extracted a symbol reference from the URL fragment.
         let mentions: Vec<_> = g
             .in_neighbors(_func)
             .filter(|(_, e)| e.kind == EdgeKind::Mentions)
             .collect();
-        eprintln!("DEBUG ref: mentions={}", mentions.len());
         assert!(
             !mentions.is_empty(),
             "function should have Mentions edges from link resolution"
@@ -702,4 +775,3 @@ let result = parse_json(input);
         assert_eq!(tokens, vec!["let", "x", "=", "parseJson", "data"]);
     }
 }
-

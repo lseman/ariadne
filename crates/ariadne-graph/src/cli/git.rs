@@ -248,8 +248,21 @@ pub fn is_source_like_path(path: &str) -> bool {
     let ext = path.split('.').next_back().unwrap_or("");
     matches!(
         ext,
-        "rs" | "py" | "js" | "ts" | "go" | "java" | "c" | "cpp"
-            | "h" | "hpp" | "cs" | "rb" | "php" | "swift" | "kt" | "scala"
+        "rs" | "py"
+            | "js"
+            | "ts"
+            | "go"
+            | "java"
+            | "c"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "cs"
+            | "rb"
+            | "php"
+            | "swift"
+            | "kt"
+            | "scala"
     )
 }
 
@@ -326,7 +339,13 @@ pub fn cypher_rel_type(t: &str) -> String {
 pub fn slugify(s: &str) -> String {
     s.to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .split('-')
         .filter(|s| !s.is_empty())

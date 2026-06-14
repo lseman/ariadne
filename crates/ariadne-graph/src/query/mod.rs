@@ -16,6 +16,7 @@
 pub mod centrality;
 pub mod communities;
 pub mod counterfactual;
+pub mod dedup;
 pub mod differential;
 pub mod impact;
 pub mod motifs;
@@ -23,11 +24,13 @@ pub mod paths;
 pub mod search;
 pub mod structure;
 
-pub use centrality::{pagerank, personalized_pagerank};
+pub use centrality::{is_rank_noise, pagerank, personalized_pagerank};
 pub use communities::{
-    community_quality, leiden, leiden_with_options, louvain, louvain_with_options,
-    CommunityObjective, CommunityOptions, CommunityQuality,
+    community_cohesion, community_quality, infomap, infomap_with_options, leiden,
+    leiden_with_options, louvain, louvain_with_options, CommunityObjective, CommunityOptions,
+    CommunityQuality, LOW_COHESION_THRESHOLD,
 };
+pub use dedup::{deduplicate_nodes, DedupOptions, DedupResult};
 pub use differential::{
     is_active_at, temporal_diff, ChangedEdge, TemporalChangeKind, TemporalDiff,
 };

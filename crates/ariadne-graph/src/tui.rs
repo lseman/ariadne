@@ -301,14 +301,12 @@ impl<'a> App<'a> {
     fn on_key_search(&mut self, key: event::KeyEvent) {
         match self.s_pane {
             SearchPane::Input => match key.code {
-                KeyCode::Esc
-                    if !self.s_hits.is_empty() => {
-                        self.s_pane = SearchPane::Results;
-                    }
-                KeyCode::Tab | KeyCode::Down
-                    if !self.s_hits.is_empty() => {
-                        self.s_pane = SearchPane::Results;
-                    }
+                KeyCode::Esc if !self.s_hits.is_empty() => {
+                    self.s_pane = SearchPane::Results;
+                }
+                KeyCode::Tab | KeyCode::Down if !self.s_hits.is_empty() => {
+                    self.s_pane = SearchPane::Results;
+                }
                 KeyCode::Enter => {
                     self.run_search();
                     if !self.s_hits.is_empty() {
@@ -332,10 +330,9 @@ impl<'a> App<'a> {
                 KeyCode::Esc => {
                     self.s_pane = SearchPane::Input;
                 }
-                KeyCode::Tab
-                    if !self.s_detail.is_empty() => {
-                        self.s_pane = SearchPane::Detail;
-                    }
+                KeyCode::Tab if !self.s_detail.is_empty() => {
+                    self.s_pane = SearchPane::Detail;
+                }
                 KeyCode::Down | KeyCode::Char('j') => {
                     Self::list_down(&mut self.s_list, self.s_hits.len());
                     self.refresh_search_detail();
@@ -396,10 +393,9 @@ impl<'a> App<'a> {
                     Self::list_page_up(&mut self.f_list, 10);
                     self.refresh_flow_members();
                 }
-                KeyCode::Tab | KeyCode::Right | KeyCode::Enter
-                    if !self.f_members.is_empty() => {
-                        self.f_pane = FlowsPane::Members;
-                    }
+                KeyCode::Tab | KeyCode::Right | KeyCode::Enter if !self.f_members.is_empty() => {
+                    self.f_pane = FlowsPane::Members;
+                }
                 _ => {}
             },
             FlowsPane::Members => match key.code {
@@ -443,10 +439,9 @@ impl<'a> App<'a> {
                     Self::list_page_up(&mut self.b_list, 15);
                     self.refresh_browse_detail();
                 }
-                KeyCode::Tab | KeyCode::Right
-                    if !self.b_detail.is_empty() => {
-                        self.b_right = true;
-                    }
+                KeyCode::Tab | KeyCode::Right if !self.b_detail.is_empty() => {
+                    self.b_right = true;
+                }
                 _ => {}
             }
         } else {

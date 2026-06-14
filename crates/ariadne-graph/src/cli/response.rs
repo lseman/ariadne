@@ -1,20 +1,18 @@
 use anyhow::{bail, Result};
-use ariadne_graph::{Graph, NodeId, NodeKind};
 use ariadne_graph::query::{
     analyze_impact, articulation_points, bridge_scores, call_resolution_stats, core_numbers,
     cyclic_components, find_top_paths, leiden, pagerank, paths::PathQuery, personalized_pagerank,
     ranked_search, temporal_diff, ImpactQuery, TemporalDiff,
 };
 use ariadne_graph::store::Store;
+use ariadne_graph::{Graph, NodeId, NodeKind};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::helpers::{resolve, source_matches};
-use super::git::{
-    git_changed_diff, git_commit_hash, git_is_ancestor, ChangedFile,
-};
+use super::git::{git_changed_diff, git_commit_hash, git_is_ancestor, ChangedFile};
 use super::helpers::{nodes_for_changed_hunk, nodes_for_changed_ranges, nodes_for_files};
+use super::helpers::{resolve, source_matches};
 
 /// One-operation JSON interface for agents and MCP wrappers.
 pub fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value> {
@@ -44,89 +42,9 @@ pub fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value
                 },
             })
         }
-        "search" => {
-            let query = params.get("query").and_then(Value::as_str).unwrap_or("");
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
-            let hits: Vec<_> = ranked_search(&graph, query, limit)
-                .into_iter()
-                .filter_map(|hit| {
-                    graph.node(hit.id).map(|n| {
-                        json!({
-                            "id": hit.id.0,
-                            "score": hit.score,
-                            "name": n.name,
-                            "qualified_name": n.qualified_name,
-                            "kind": n.kind,
-                            "source_uri": n.source_uri,
-                            "signals": hit.signals,
-                        })
-                    })
-                })
-                .collect();
-            compact_for_detail(json!({ "operation": operation, "hits": hits }), detail)
-        }
-        "paths" => {
-            let from = required_str(params, "from")?;
-            let to = required_str(params, "to")?;
-            let max_hops = params.get("max_hops").and_then(Value::as_u64).unwrap_or(5) as usize;
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
-            let from_id = resolve(&graph, from)?;
-            let to_id = resolve(&graph, to)?;
-            let paths: Vec<_> =
-                find_top_paths(&graph, &PathQuery::between(from_id, to_id, max_hops), limit)
-                    .into_iter()
-                    .map(|path| {
-                        let nodes: Vec<_> = path
-                            .nodes
-                            .into_iter()
-                            .filter_map(|id| {
-                                graph.node(id).map(|n| {
-                                    json!({
-                                        "id": id.0,
-                                        "qualified_name": n.qualified_name,
-                                        "kind": n.kind,
-                                    })
-                                })
-                            })
-                            .collect();
-                        json!({ "cost": path.cost, "nodes": nodes })
-                    })
-                    .collect();
-            compact_for_detail(json!({ "operation": operation, "paths": paths }), detail)
-        }
-        "impact" => {
-            let target = required_str(params, "target")?;
-            let max_hops = params.get("max_hops").and_then(Value::as_u64).unwrap_or(4) as usize;
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
-            let seed = resolve(&graph, target)?;
-            let hits: Vec<_> = analyze_impact(
-                &graph,
-                ImpactQuery {
-                    seed,
-                    max_hops,
-                    limit,
-                },
-            )
-            .into_iter()
-            .filter_map(|hit| {
-                graph.node(hit.id).map(|n| {
-                    json!({
-                        "id": hit.id.0,
-                        "score": hit.score,
-                        "distance": hit.distance,
-                        "qualified_name": n.qualified_name,
-                        "kind": n.kind,
-                        "source_uri": n.source_uri,
-                        "via": hit.via,
-                    })
-                })
-            })
-            .collect();
-            compact_for_detail(
-                json!({ "operation": operation, "target": target, "hits": hits }),
-                detail,
-            )
-        }
+        "search" => compact_for_detail(handle_search(&graph, params), detail),
+        "paths" => compact_for_detail(handle_paths(&graph, params)?, detail),
+        "impact" => compact_for_detail(handle_impact(&graph, params)?, detail),
         "detect_changes" => {
             let base = params
                 .get("base")
@@ -207,19 +125,31 @@ pub fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value
             compact_for_detail(diagnostics_json(db, limit)?, detail)
         }
         "graph_diff" => {
-            let base = params.get("base").and_then(Value::as_str).unwrap_or("HEAD~1");
+            let base = params
+                .get("base")
+                .and_then(Value::as_str)
+                .unwrap_or("HEAD~1");
             let head = params.get("head").and_then(Value::as_str).unwrap_or("HEAD");
             let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
             compact_for_detail(graph_diff_json(db, base, head, limit)?, detail)
         }
         "counterfactual" => {
             let target = required_str(params, "target")?;
-            let direction = params.get("direction").and_then(Value::as_str).unwrap_or("out");
+            let direction = params
+                .get("direction")
+                .and_then(Value::as_str)
+                .unwrap_or("out");
             let max_depth = params.get("max_depth").and_then(Value::as_u64).unwrap_or(5) as usize;
-            compact_for_detail(counterfactual_json(db, target, direction, max_depth)?, detail)
+            compact_for_detail(
+                counterfactual_json(db, target, direction, max_depth)?,
+                detail,
+            )
         }
         "motifs" => {
-            let built_in = params.get("built_in").and_then(Value::as_str).unwrap_or("security_audit");
+            let built_in = params
+                .get("built_in")
+                .and_then(Value::as_str)
+                .unwrap_or("security_audit");
             let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
             compact_for_detail(motifs_json(db, built_in, limit)?, detail)
         }
@@ -233,94 +163,303 @@ pub fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value
             compact_for_detail(suggested_questions_json(&analysis, limit), detail)
         }
         "architecture_overview" | "architecture" => architecture_overview_json(&graph, detail),
-        "god_nodes" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
-            let ranks = if let Some(seed) = params.get("seed").and_then(Value::as_str) {
-                let seed_id = resolve(&graph, seed)?;
-                personalized_pagerank(&graph, &[(seed_id, 1.0)], 0.85, 50)
-            } else {
-                pagerank(&graph, 0.85, 50)
-            };
-            let mut sorted: Vec<_> = ranks.into_iter().collect();
-            sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let hits: Vec<_> = sorted
-                .into_iter()
-                .take(limit)
-                .filter_map(|(id, score)| {
-                    graph.node(id).map(|n| {
-                        json!({
-                            "id": id.0,
-                            "score": score,
-                            "qualified_name": n.qualified_name,
-                            "kind": n.kind,
-                        })
-                    })
-                })
-                .collect();
-            compact_for_detail(json!({ "operation": operation, "hits": hits }), detail)
+        "god_nodes" => compact_for_detail(handle_god_nodes(&graph, params)?, detail),
+        "flows" => compact_for_detail(handle_flows(&graph, params), detail),
+        "affected_flows" => compact_for_detail(handle_affected_flows(db, params)?, detail),
+        "blast_radius" | "impact_radius" => {
+            compact_for_detail(handle_blast_radius(db, params)?, detail)
         }
-        "flows" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
-            let ids = ariadne_graph::extract::flows::all_flows(&graph);
-            let total = ids.len();
-            let hits: Vec<Value> = ids
-                .into_iter()
-                .take(limit)
-                .filter_map(|id| {
-                    let node = graph.node(id)?;
-                    Some(json!({
-                        "id": id.0,
-                        "qualified_name": node.qualified_name,
-                        "entry_qualified_name": node.properties.get("entry_qualified_name"),
-                        "entry_name": node.properties.get("entry_name"),
-                        "criticality": node.properties.get("criticality"),
-                        "node_count": node.properties.get("node_count"),
-                        "depth": node.properties.get("depth"),
-                        "is_test_flow": node.properties.get("is_test_flow"),
-                    }))
-                })
-                .collect();
+        "test_coverage" => compact_for_detail(handle_test_coverage(db, &graph, params)?, detail),
+        "report" => {
+            let output = required_str(params, "output")?;
+            let top = params.get("top").and_then(Value::as_u64).unwrap_or(25) as usize;
+            let markdown = generate_report_markdown(db, top)?;
+            std::fs::write(output, markdown)?;
             compact_for_detail(
-                json!({
-                    "operation": operation,
-                    "hits": hits,
-                    "total": total,
-                    "truncated": total > limit,
-                }),
-                detail,
-            )
-        }
-        "affected_flows" => {
-            let base = params
-                .get("base")
-                .and_then(Value::as_str)
-                .unwrap_or("HEAD~1");
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
-            let analysis = detect_changes_json(db, base, 2)?;
-            let payload = analysis
-                .get("affected_flows")
-                .cloned()
-                .unwrap_or_else(|| json!({"hits": [], "total": 0, "truncated": false}));
-            let truncated_hits: Vec<Value> = payload["hits"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .take(limit)
-                .collect();
-            compact_for_detail(
-                json!({
-                    "operation": operation,
-                    "base": base,
-                    "hits": truncated_hits,
-                    "total": payload["total"],
-                }),
+                json!({ "operation": operation, "output": output, "written": true }),
                 detail,
             )
         }
         other => bail!("unknown tool operation {}", other),
     };
     Ok(apply_response_guardrails(response, &graph, params, detail))
+}
+
+fn handle_search(graph: &Graph, params: &Value) -> Value {
+    let query = params.get("query").and_then(Value::as_str).unwrap_or("");
+    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+    let hits: Vec<_> = ranked_search(graph, query, limit)
+        .into_iter()
+        .filter_map(|hit| {
+            graph.node(hit.id).map(|n| {
+                json!({
+                    "id": hit.id.0,
+                    "score": hit.score,
+                    "name": n.name,
+                    "qualified_name": n.qualified_name,
+                    "kind": n.kind,
+                    "source_uri": n.source_uri,
+                    "signals": hit.signals,
+                })
+            })
+        })
+        .collect();
+    json!({ "operation": "search", "hits": hits })
+}
+
+fn handle_paths(graph: &Graph, params: &Value) -> Result<Value> {
+    let from = required_str(params, "from")?;
+    let to = required_str(params, "to")?;
+    let max_hops = params.get("max_hops").and_then(Value::as_u64).unwrap_or(5) as usize;
+    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+    let from_id = resolve(graph, from)?;
+    let to_id = resolve(graph, to)?;
+    let paths: Vec<_> =
+        find_top_paths(graph, &PathQuery::between(from_id, to_id, max_hops), limit)
+            .into_iter()
+            .map(|path| {
+                let nodes: Vec<_> = path
+                    .nodes
+                    .into_iter()
+                    .filter_map(|id| {
+                        graph.node(id).map(|n| {
+                            json!({
+                                "id": id.0,
+                                "qualified_name": n.qualified_name,
+                                "kind": n.kind,
+                            })
+                        })
+                    })
+                    .collect();
+                json!({ "cost": path.cost, "nodes": nodes })
+            })
+            .collect();
+    Ok(json!({ "operation": "paths", "paths": paths }))
+}
+
+fn handle_impact(graph: &Graph, params: &Value) -> Result<Value> {
+    let target = required_str(params, "target")?;
+    let max_hops = params.get("max_hops").and_then(Value::as_u64).unwrap_or(4) as usize;
+    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+    let seed = resolve(graph, target)?;
+    let hits: Vec<_> = analyze_impact(
+        graph,
+        ImpactQuery {
+            seed,
+            max_hops,
+            limit,
+        },
+    )
+    .into_iter()
+    .filter_map(|hit| {
+        graph.node(hit.id).map(|n| {
+            json!({
+                "id": hit.id.0,
+                "score": hit.score,
+                "distance": hit.distance,
+                "qualified_name": n.qualified_name,
+                "kind": n.kind,
+                "source_uri": n.source_uri,
+                "via": hit.via,
+            })
+        })
+    })
+    .collect();
+    Ok(json!({ "operation": "impact", "target": target, "hits": hits }))
+}
+
+fn handle_god_nodes(graph: &Graph, params: &Value) -> Result<Value> {
+    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+    let ranks = if let Some(seed) = params.get("seed").and_then(Value::as_str) {
+        let seed_id = resolve(graph, seed)?;
+        personalized_pagerank(graph, &[(seed_id, 1.0)], 0.85, 50)
+    } else {
+        pagerank(graph, 0.85, 50)
+    };
+    let mut sorted: Vec<_> = ranks.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let hits: Vec<_> = sorted
+        .into_iter()
+        .filter_map(|(id, score)| {
+            let n = graph.node(id)?;
+            if ariadne_graph::query::is_rank_noise(n) {
+                return None;
+            }
+            Some(json!({
+                "id": id.0,
+                "score": score,
+                "qualified_name": n.qualified_name,
+                "kind": n.kind,
+            }))
+        })
+        .take(limit)
+        .collect();
+    Ok(json!({ "operation": "god_nodes", "hits": hits }))
+}
+
+fn handle_flows(graph: &Graph, params: &Value) -> Value {
+    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+    let ids = ariadne_graph::extract::flows::all_flows(graph);
+    let total = ids.len();
+    let hits: Vec<Value> = ids
+        .into_iter()
+        .take(limit)
+        .filter_map(|id| {
+            let node = graph.node(id)?;
+            Some(json!({
+                "id": id.0,
+                "qualified_name": node.qualified_name,
+                "entry_qualified_name": node.properties.get("entry_qualified_name"),
+                "entry_name": node.properties.get("entry_name"),
+                "criticality": node.properties.get("criticality"),
+                "node_count": node.properties.get("node_count"),
+                "depth": node.properties.get("depth"),
+                "is_test_flow": node.properties.get("is_test_flow"),
+            }))
+        })
+        .collect();
+    json!({
+        "operation": "flows",
+        "hits": hits,
+        "total": total,
+        "truncated": total > limit,
+    })
+}
+
+fn handle_affected_flows(db: &Path, params: &Value) -> Result<Value> {
+    let base = params
+        .get("base")
+        .and_then(Value::as_str)
+        .unwrap_or("HEAD~1");
+    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+    let analysis = detect_changes_json(db, base, 2)?;
+    let payload = analysis
+        .get("affected_flows")
+        .cloned()
+        .unwrap_or_else(|| json!({"hits": [], "total": 0, "truncated": false}));
+    let truncated_hits: Vec<Value> = payload["hits"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .take(limit)
+        .collect();
+    Ok(json!({
+        "operation": "affected_flows",
+        "base": base,
+        "hits": truncated_hits,
+        "total": payload["total"],
+    }))
+}
+
+fn handle_blast_radius(db: &Path, params: &Value) -> Result<Value> {
+    let base = params
+        .get("base")
+        .and_then(Value::as_str)
+        .unwrap_or("HEAD~1");
+    let max_depth = params.get("max_depth").and_then(Value::as_u64).unwrap_or(2) as usize;
+    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+    let analysis = detect_changes_json(db, base, max_depth)?;
+    let changed_files: Vec<Value> = analysis["changed_files"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .take(limit)
+        .collect();
+    let changed_symbols: Vec<Value> = analysis["changed_symbols"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .take(limit)
+        .collect();
+    let impacted: Vec<Value> = analysis["impacted"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .take(limit)
+        .collect();
+    let test_cov = analysis
+        .get("test_coverage")
+        .cloned()
+        .unwrap_or_else(|| json!({"covered": [], "missing": [], "missing_count": 0}));
+    Ok(json!({
+        "operation": "blast_radius",
+        "base": base,
+        "risk": analysis["risk"].clone(),
+        "risk_score": analysis["risk_score"],
+        "changed_files": changed_files,
+        "changed_files_count": changed_files.len(),
+        "changed_symbols": changed_symbols,
+        "changed_symbols_count": changed_symbols.len(),
+        "impacted": impacted,
+        "impacted_count": impacted.len(),
+        "test_coverage": test_cov,
+    }))
+}
+
+fn handle_test_coverage(db: &Path, graph: &Graph, params: &Value) -> Result<Value> {
+    let base = params
+        .get("base")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let target = params
+        .get("target")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let result = match (base, target) {
+        (Some(base), _) => {
+            let analysis = detect_changes_json(db, &base, 2)?;
+            analysis
+                .get("test_coverage")
+                .cloned()
+                .unwrap_or_else(|| json!({"covered": [], "missing": [], "missing_count": 0}))
+        }
+        (_, Some(target)) => {
+            let seed = resolve(graph, &target)?;
+            let mut covered = Vec::new();
+            let mut missing = Vec::new();
+            if let Some(node) = graph.node(seed) {
+                if matches!(node.kind, NodeKind::Function | NodeKind::Method) {
+                    let tests: Vec<Value> = graph
+                        .out_neighbors(seed)
+                        .filter(|(_, edge)| edge.kind == ariadne_graph::EdgeKind::TestedBy)
+                        .filter_map(|(test_id, _)| {
+                            graph.node(test_id).map(|t| {
+                                json!({
+                                    "id": test_id.0,
+                                    "qualified_name": t.qualified_name,
+                                    "source_uri": t.source_uri,
+                                })
+                            })
+                        })
+                        .collect();
+                    let entry = json!({
+                        "id": seed.0,
+                        "qualified_name": node.qualified_name,
+                        "kind": node.kind,
+                        "source_uri": node.source_uri,
+                        "tests": tests,
+                    });
+                    if tests.is_empty() {
+                        missing.push(entry);
+                    } else {
+                        covered.push(entry);
+                    }
+                }
+            }
+            json!({
+                "target": target,
+                "covered": covered,
+                "missing": missing,
+                "missing_count": missing.len(),
+            })
+        }
+        _ => json!({"covered": [], "missing": [], "missing_count": 0}),
+    };
+    Ok(json!({ "operation": "test_coverage", "result": result }))
 }
 
 /// Minimal context for a target.
@@ -545,6 +684,7 @@ pub fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
     for (&node, &community) in &communities {
         by_comm.entry(community).or_default().push(node);
     }
+    let cohesion = ariadne_graph::query::community_cohesion(graph, &communities);
 
     let mut summaries: Vec<_> = by_comm
         .iter()
@@ -566,6 +706,7 @@ pub fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
             json!({
                 "community": community,
                 "size": members.len(),
+                "cohesion": cohesion.get(community).copied().unwrap_or(0.0),
                 "top_files": top_files.into_iter().take(detail.limit(5)).map(|(path, count)| json!({"path": path, "nodes": count})).collect::<Vec<_>>(),
                 "kind_counts": kind_counts.into_iter().map(|(kind, count)| json!({"kind": kind, "count": count})).collect::<Vec<_>>(),
             })
@@ -598,7 +739,7 @@ pub fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
     let cycles = cycles_json(graph, detail.limit(8));
     let core = core_json(graph, detail.limit(10));
     let articulations = articulation_json(graph, detail.limit(10));
-    let warnings: Vec<_> = coupling_rows
+    let mut warnings: Vec<_> = coupling_rows
         .iter()
         .take(5)
         .filter_map(|row| {
@@ -613,6 +754,25 @@ pub fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
             })
         })
         .collect();
+    let mut low_cohesion: Vec<(&usize, usize, f32)> =
+        by_comm
+            .iter()
+            .filter_map(|(community, members)| {
+                let score = cohesion.get(community).copied().unwrap_or(1.0);
+                (members.len() > 1 && score < ariadne_graph::query::LOW_COHESION_THRESHOLD)
+                    .then_some((community, members.len(), score))
+            })
+            .collect();
+    low_cohesion.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    for (community, size, score) in low_cohesion.into_iter().take(5) {
+        warnings.push(json!({
+            "kind": "low_cohesion_community",
+            "severity": "medium",
+            "community": community,
+            "size": size,
+            "cohesion": score,
+        }));
+    }
 
     json!({
         "operation": "architecture_overview",
@@ -1083,12 +1243,18 @@ fn language_of(node: &ariadne_graph::core::Node) -> Option<&'static str> {
     Some(match ext {
         "rs" => "rust",
         "py" => "python",
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => "js",
         "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx" => "cpp",
         "md" | "markdown" => "markdown",
         "tex" => "latex",
         "svg" => "diagram",
         _ => return None,
     })
+}
+
+/// Languages that represent documentation rather than executable code.
+fn is_doc_language(lang: &str) -> bool {
+    matches!(lang, "markdown" | "latex" | "diagram")
 }
 
 /// Rank "surprising" edges: those that cross a community boundary, cross a
@@ -1110,7 +1276,7 @@ pub fn surprises_json(graph: &Graph, limit: usize) -> Value {
     };
 
     let mut rows: Vec<Value> = Vec::new();
-    for (id, src, dst, _edge) in graph.edges() {
+    for (id, src, dst, edge) in graph.edges() {
         // Skip edges into unresolved placeholders — their "surprise" is
         // just missing resolution, not real coupling.
         let (Some(s), Some(d)) = (graph.node(src), graph.node(dst)) else {
@@ -1118,6 +1284,21 @@ pub fn surprises_json(graph: &Graph, limit: usize) -> Value {
         };
         if s.qualified_name.starts_with("call::") || d.qualified_name.starts_with("call::") {
             continue;
+        }
+
+        // Cross-language false positives: an inferred call across a
+        // language boundary is almost always a name-collision artefact,
+        // and a code→doc "calls" edge is an extraction artefact. Neither
+        // is real coupling, so the edge is excluded entirely.
+        let langs = (language_of(s), language_of(d));
+        if let (Some(ls), Some(ld)) = langs {
+            if ls != ld && edge.kind == ariadne_graph::core::EdgeKind::Calls {
+                let inferred = edge.confidence != ariadne_graph::core::Confidence::Extracted;
+                let code_to_doc = !is_doc_language(ls) && is_doc_language(ld);
+                if inferred || code_to_doc {
+                    continue;
+                }
+            }
         }
 
         let mut signals: Vec<&str> = Vec::new();
@@ -1130,7 +1311,7 @@ pub fn surprises_json(graph: &Graph, limit: usize) -> Value {
             }
             _ => {}
         }
-        if let (Some(ls), Some(ld)) = (language_of(s), language_of(d)) {
+        if let (Some(ls), Some(ld)) = langs {
             if ls != ld {
                 signals.push("cross_language");
                 score += 1.5;
@@ -1302,16 +1483,22 @@ pub fn graph_diff_json(db: &Path, base: &str, head: &str, top: usize) -> Result<
             "error": "graph has no temporal data; rebuild with git context (run `build` inside a git repo)",
         }));
     }
-    let (Some(base_hash), Some(head_hash)) = (git_commit_hash(base)?, git_commit_hash(head)?) else {
+    let (Some(base_hash), Some(head_hash)) = (git_commit_hash(base)?, git_commit_hash(head)?)
+    else {
         bail!("could not resolve git refs {base} / {head}");
     };
 
     let mut cache = HashMap::new();
-    let diff = temporal_diff(&graph, &base_hash, &head_hash, &mut |ancestor, descendant| {
-        *cache
-            .entry((ancestor.to_string(), descendant.to_string()))
-            .or_insert_with(|| git_is_ancestor(ancestor, descendant))
-    });
+    let diff = temporal_diff(
+        &graph,
+        &base_hash,
+        &head_hash,
+        &mut |ancestor, descendant| {
+            *cache
+                .entry((ancestor.to_string(), descendant.to_string()))
+                .or_insert_with(|| git_is_ancestor(ancestor, descendant))
+        },
+    );
 
     Ok(json!({
         "operation": "graph_diff",
@@ -1409,7 +1596,9 @@ pub fn motifs_json(db: &Path, built_in: &str, limit: usize) -> Result<Value> {
         "security_audit" => security_audit_motif(),
         "diamond" => diamond_inheritance_motif(),
         "doc_triangle" => doc_function_triangle(),
-        other => bail!("unknown built-in motif {other}; expected security_audit, diamond, or doc_triangle"),
+        other => bail!(
+            "unknown built-in motif {other}; expected security_audit, diamond, or doc_triangle"
+        ),
     };
 
     let matches = find_motifs(&graph, &motif, limit);
@@ -1448,9 +1637,8 @@ pub fn suggested_questions_json(analysis: &Value, limit: usize) -> Value {
 
 /// Audit each changed symbol for test coverage.
 fn test_coverage_json(graph: &Graph, changed_nodes: &[NodeId]) -> Value {
-    let is_callable = |n: &ariadne_graph::Node| {
-        matches!(n.kind, NodeKind::Function | NodeKind::Method)
-    };
+    let is_callable =
+        |n: &ariadne_graph::Node| matches!(n.kind, NodeKind::Function | NodeKind::Method);
     let is_test_node = |n: &ariadne_graph::Node| {
         n.properties
             .get("is_test")
@@ -1656,17 +1844,6 @@ fn required_str<'a>(params: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow::anyhow!("missing string param '{}'", key))
 }
 
-/// Helper: append unique nodes.
-#[allow(dead_code)]
-fn append_unique_nodes(nodes: &mut Vec<NodeId>, extra: Vec<NodeId>) {
-    let mut seen: HashSet<NodeId> = nodes.iter().copied().collect();
-    for id in extra {
-        if seen.insert(id) {
-            nodes.push(id);
-        }
-    }
-}
-
 /// Helper: nodes JSON.
 fn nodes_json(graph: &Graph, ids: &[NodeId], limit: usize) -> Vec<Value> {
     ids.iter()
@@ -1711,6 +1888,240 @@ fn changed_ranges_json(graph: &Graph, diff: &[ChangedFile]) -> Vec<Value> {
         .collect()
 }
 
+/// Generate a Markdown report from the graph and diagnostics.
+pub fn generate_report_markdown(db: &Path, top: usize) -> Result<String> {
+    use ariadne_graph::query::{leiden, pagerank};
+
+    let store = Store::open(db)?;
+    let graph = store.load()?;
+    let diag = diagnostics_json(db, top)?;
+    let arch = architecture_overview_json(&graph, DetailLevel::Standard);
+
+    // God nodes
+    let ranks = pagerank(&graph, 0.85, 50);
+    let mut sorted: Vec<_> = ranks.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let top_nodes: Vec<String> = sorted
+        .into_iter()
+        .take(top)
+        .filter_map(|(id, _)| graph.node(id).map(|n| n.qualified_name.clone()))
+        .collect();
+
+    // Bridges
+    let communities = leiden(&graph);
+    let bridges = bridge_scores(&graph, &communities, top);
+    let top_bridges: Vec<String> = bridges
+        .into_iter()
+        .filter_map(|bs| {
+            graph
+                .node(bs.node)
+                .map(|n| format!("{} ({:.4})", n.qualified_name, bs.score))
+        })
+        .take(10)
+        .collect();
+
+    // Gaps
+    let gap_rows = gaps_json(&graph, top);
+    let top_gaps: Vec<String> = gap_rows
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .map(|hits| {
+            hits.iter()
+                .filter_map(|h| h["qualified_name"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Surprises
+    let surprise_rows = surprises_json(&graph, top);
+    let top_surprises: Vec<String> = surprise_rows
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .map(|hits| {
+            hits.iter()
+                .map(|h| {
+                    let src = h
+                        .get("src")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let dst = h
+                        .get("dst")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let score = h.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    format!("{src} ↔ {dst} ({score:.2})")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Communities
+    let comm = leiden(&graph);
+    let mut by_comm: std::collections::BTreeMap<usize, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (id, &c) in &comm {
+        if let Some(n) = graph.node(*id) {
+            by_comm.entry(c).or_default().push(n.qualified_name.clone());
+        }
+    }
+    let mut entries: Vec<_> = by_comm.into_iter().collect();
+    entries.sort_by_key(|(_, members)| std::cmp::Reverse(members.len()));
+    let community_lines: Vec<String> = entries
+        .iter()
+        .take(10)
+        .map(|(c, members)| {
+            format!(
+                "- **Community {}** ({} members): {}",
+                c,
+                members.len(),
+                members
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect();
+
+    // Build markdown
+    let mut md = String::new();
+    md.push_str("# Ariadne Graph Report\n\n");
+    md.push_str(&format!("Generated from: `{}`\n\n", db.display()));
+
+    // Health
+    md.push_str("## Health\n\n");
+    if let Some(health) = diag.get("health") {
+        md.push_str(&format!(
+            "- **Status**: {}\n",
+            health.as_str().unwrap_or("unknown")
+        ));
+    }
+    if let Some(warnings) = diag.get("warnings").and_then(|w| w.as_array()) {
+        for w in warnings {
+            let kind = w.get("kind").and_then(|k| k.as_str()).unwrap_or("unknown");
+            let msg = w.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            md.push_str(&format!("- ⚠️ **{}**: {}\n", kind, msg));
+        }
+    }
+    md.push('\n');
+
+    // Index coverage
+    md.push_str("## Index Coverage\n\n");
+    if let Some(ic) = diag.get("index_coverage") {
+        if let Some(fts) = ic.get("fts5") {
+            md.push_str(&format!(
+                "- **FTS5**: {} nodes indexed\n",
+                fts.as_str().unwrap_or("?")
+            ));
+        }
+        if let Some(embed) = ic.get("embedding") {
+            md.push_str(&format!(
+                "- **Embedding**: {} vectors\n",
+                embed.as_str().unwrap_or("?")
+            ));
+        }
+    }
+    md.push('\n');
+
+    // Confidence
+    md.push_str("## Confidence Mix\n\n");
+    if let Some(cm) = diag.get("confidence_mix") {
+        for key in &["extracted", "inferred", "ambiguous"] {
+            if let Some(val) = cm.get(key).and_then(|v| v.as_u64()) {
+                md.push_str(&format!("- **{}**: {}\n", key, val));
+            }
+        }
+    }
+    md.push('\n');
+
+    // Call resolution
+    md.push_str("## Call Resolution\n\n");
+    if let Some(cr) = diag.get("call_resolution") {
+        if let Some(resolved) = cr.get("resolved").and_then(|v| v.as_u64()) {
+            md.push_str(&format!("- Resolved: {}\n", resolved));
+        }
+        if let Some(unresolved) = cr.get("unresolved").and_then(|v| v.as_u64()) {
+            md.push_str(&format!("- Unresolved: {}\n", unresolved));
+        }
+        if let Some(rate) = cr.get("rate").and_then(|v| v.as_f64()) {
+            md.push_str(&format!("- Rate: {:.1}%\n\n", rate * 100.0));
+        }
+    }
+
+    // Architecture overview
+    md.push_str("## Architecture\n\n");
+    if let Some(overview) = arch.get("summary") {
+        md.push_str(&format!("{}\n\n", overview.as_str().unwrap_or("")));
+    }
+    if let Some(comm) = arch.get("community_count").and_then(|v| v.as_u64()) {
+        md.push_str(&format!("Communities: {}\n\n", comm));
+    }
+
+    // Communities
+    md.push_str("## Top Communities\n\n");
+    for line in &community_lines {
+        md.push_str(&format!("{}\n", line));
+    }
+    if community_lines.is_empty() {
+        md.push_str("_No communities detected._\n");
+    }
+    md.push('\n');
+
+    // God nodes
+    md.push_str("## Top Nodes (PageRank)\n\n");
+    if top_nodes.is_empty() {
+        md.push_str("_No nodes ranked._\n");
+    } else {
+        for (i, name) in top_nodes.iter().enumerate().take(15) {
+            md.push_str(&format!("{}. {}\n", i + 1, name));
+        }
+    }
+    md.push('\n');
+
+    // Bridges
+    md.push_str("## Bridge Nodes\n\n");
+    if top_bridges.is_empty() {
+        md.push_str("_No significant bridges._\n");
+    } else {
+        for b in &top_bridges {
+            md.push_str(&format!("- {}\n", b));
+        }
+    }
+    md.push('\n');
+
+    // Gaps
+    md.push_str("## Gaps\n\n");
+    if top_gaps.is_empty() {
+        md.push_str("_No gaps detected._\n");
+    } else {
+        for g in &top_gaps {
+            md.push_str(&format!("- {}\n", g));
+        }
+    }
+    md.push('\n');
+
+    // Surprises
+    md.push_str("## Surprises\n\n");
+    if top_surprises.is_empty() {
+        md.push_str("_No surprises._\n");
+    } else {
+        for s in &top_surprises {
+            md.push_str(&format!("- {}\n", s));
+        }
+    }
+    md.push('\n');
+
+    // Nodes/edges summary
+    md.push_str("## Summary\n\n");
+    md.push_str(&format!("- **Nodes**: {}\n", graph.node_count()));
+    md.push_str(&format!("- **Edges**: {}\n", graph.edge_count()));
+
+    Ok(md)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1744,12 +2155,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn surprises_suppresses_inferred_cross_language_calls() {
+        // An *inferred* call from Python to a JS file is almost always a
+        // name-collision artefact (e.g. both define `print`), not real
+        // coupling — it must not appear in surprises at all.
+        let mut g = Graph::new();
+        let mut py = Node::new(NodeKind::Function, "py::print_report");
+        py.source_uri = Some("report/gen.py".to_string());
+        let py_id = g.add_node(py);
+        let mut js = Node::new(NodeKind::Function, "js::print");
+        js.source_uri = Some("web/print.js".to_string());
+        let js_id = g.add_node(js);
+        g.add_edge(py_id, js_id, Edge::inferred(EdgeKind::Calls, 0.7));
+
+        let out = surprises_json(&g, 10);
+        let hits = out["hits"].as_array().unwrap();
+        assert!(
+            hits.is_empty(),
+            "inferred cross-language call must be suppressed, got {hits:?}"
+        );
+    }
+
+    #[test]
+    fn surprises_suppresses_code_to_doc_calls() {
+        // A "calls" edge from code into a Markdown section is an
+        // extraction artefact, never real architecture.
+        let mut g = Graph::new();
+        let mut rs = Node::new(NodeKind::Function, "rs::build");
+        rs.source_uri = Some("src/build.rs".to_string());
+        let rs_id = g.add_node(rs);
+        let mut doc = Node::new(NodeKind::Section, "doc::building");
+        doc.source_uri = Some("docs/build.md".to_string());
+        let doc_id = g.add_node(doc);
+        g.add_edge(rs_id, doc_id, Edge::extracted(EdgeKind::Calls));
+
+        let out = surprises_json(&g, 10);
+        let hits = out["hits"].as_array().unwrap();
+        assert!(
+            hits.is_empty(),
+            "code→doc calls edge must be suppressed, got {hits:?}"
+        );
+
+        // But a Mentions edge across the same boundary is legitimate
+        // cross-language coupling and stays visible.
+        g.add_edge(doc_id, rs_id, Edge::extracted(EdgeKind::Mentions));
+        let out = surprises_json(&g, 10);
+        let hits = out["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1, "mentions edge should remain, got {hits:?}");
+    }
+
     /// Save a small graph to a temp-file db and run `diagnostics_json`
     /// against it (the function opens the store by path, so an in-memory
     /// store will not do).
     fn diagnostics_for(graph: &Graph) -> (Value, std::path::PathBuf) {
-        let path = std::env::temp_dir()
-            .join(format!("ariadne_diag_{}_{}.db", std::process::id(), graph.node_count()));
+        let path = std::env::temp_dir().join(format!(
+            "ariadne_diag_{}_{}.db",
+            std::process::id(),
+            graph.node_count()
+        ));
         let _ = std::fs::remove_file(&path);
         let mut store = Store::open(&path).unwrap();
         store.save(graph).unwrap();
@@ -1771,7 +2235,13 @@ mod tests {
         let (report, path) = diagnostics_for(&g);
 
         // All documented top-level sections are present.
-        for key in ["health", "index_coverage", "confidence_mix", "call_resolution", "warnings"] {
+        for key in [
+            "health",
+            "index_coverage",
+            "confidence_mix",
+            "call_resolution",
+            "warnings",
+        ] {
             assert!(report.get(key).is_some(), "missing section: {key}");
         }
         // Confidence mix counts the three call edges.

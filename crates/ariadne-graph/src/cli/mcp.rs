@@ -6,7 +6,7 @@ use std::path::Path;
 /// MCP tool schema.
 pub fn ariadne_mcp_tool_schema() -> Value {
     json!({
-        "name": "ariadne",
+        "name": "graph",
         "description": "One-tool interface to Ariadne's code graph: search, review context, impact, paths, architecture, cycles, core nodes, and more.",
         "inputSchema": {
             "type": "object",
@@ -95,34 +95,43 @@ pub struct McpMessage {
     pub body: String,
 }
 
-/// Read MCP message.
+/// Read an MCP message from the reader.
+/// Supports two framing formats:
+/// 1. Content-Length framing (standard MCP): `Content-Length: N\r\n\r\n{body}`
+/// 2. Newline-delimited JSON (NDJSON): `{json}\n` — used by the TS SDK
 pub fn read_mcp_message<R: BufRead>(reader: &mut R) -> Result<Option<String>> {
-    let mut content_length = None;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            return Ok(None);
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(None);
+    }
+    let trimmed = line.trim_end_matches(['\r', '\n']);
+
+    if let Some(len_str) = trimmed.strip_prefix("Content-Length:") {
+        // Content-Length framing: parse header, read exact body
+        let len = len_str.trim().parse::<usize>()?;
+        let mut buf = vec![0u8; len];
+        // Consume the trailing \r\n after Content-Length header
+        let mut sep = String::new();
+        reader.read_line(&mut sep)?;
+        reader.read_exact(&mut buf)?;
+        Ok(Some(String::from_utf8(buf)?))
+    } else {
+        // NDJSON: the line itself is the JSON message
         if trimmed.is_empty() {
-            break;
-        }
-        if let Some(value) = trimmed.strip_prefix("Content-Length:") {
-            content_length = Some(value.trim().parse::<usize>()?);
+            Ok(None)
+        } else {
+            Ok(Some(trimmed.to_string()))
         }
     }
-    let Some(len) = content_length else {
-        return Ok(None);
-    };
-    let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf)?;
-    Ok(Some(String::from_utf8(buf)?))
 }
 
-/// Write MCP message.
+/// Write MCP message as newline-delimited JSON (compatible with both
+/// Content-Length clients and NDJSON clients like the TS SDK).
 pub fn write_mcp_message<W: Write>(writer: &mut W, value: &Value) -> Result<()> {
     let body = serde_json::to_string(value)?;
-    write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body)?;
+    // Send NDJSON (\n-terminated) — works with the TS SDK's ReadBuffer
+    // and is also accepted by Content-Length readers that parse the JSON body
+    writeln!(writer, "{}", body)?;
     writer.flush()?;
     Ok(())
 }

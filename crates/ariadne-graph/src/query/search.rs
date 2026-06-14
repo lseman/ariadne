@@ -59,11 +59,16 @@ pub fn ranked_search(graph: &Graph, query: &str, limit: usize) -> Vec<SearchHit>
                 signals.push("tokens");
                 matched = true;
             }
-            let fuzzy = fuzzy_score(&q, &name).max(fuzzy_score(&q, &qname));
-            if fuzzy >= 0.58 {
-                score += fuzzy * 28.0;
-                signals.push("fuzzy");
-                matched = true;
+            // Fuzzy scoring is expensive (7 similarity algorithms). Skip when
+            // a cheaper match already hit, and skip when the candidate is
+            // shorter than the query (can't be a fuzzy match for typos).
+            if !matched && name.len() >= q.len() {
+                let fuzzy = fuzzy_score(&q, &name).max(fuzzy_score(&q, &qname));
+                if fuzzy >= 0.58 {
+                    score += fuzzy * 28.0;
+                    signals.push("fuzzy");
+                    matched = true;
+                }
             }
 
             if !matched {

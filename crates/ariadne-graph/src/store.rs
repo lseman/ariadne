@@ -158,6 +158,13 @@ impl Store {
         tx.execute("DELETE FROM nodes_fts", [])?;
         tx.execute("DELETE FROM nodes", [])?;
 
+        // Batch node inserts with a prepared statement.
+        let mut node_stmt = tx.prepare(
+            "INSERT INTO nodes (kind, name, qualified_name, source_uri,
+                                line_start, line_end, properties,
+                                valid_from, valid_to)
+             VALUES (?,?,?,?,?,?,?,?,?)",
+        )?;
         let mut id_map: HashMap<u32, i64> = HashMap::new();
         for (nid, node) in graph.nodes() {
             let kind = serde_json::to_value(node.kind)?
@@ -165,25 +172,20 @@ impl Store {
                 .unwrap_or("")
                 .to_string();
             let props = serde_json::to_string(&node.properties)?;
-            tx.execute(
-                "INSERT INTO nodes (kind, name, qualified_name, source_uri,
-                                    line_start, line_end, properties,
-                                    valid_from, valid_to)
-                 VALUES (?,?,?,?,?,?,?,?,?)",
-                params![
-                    kind,
-                    node.name,
-                    node.qualified_name,
-                    node.source_uri,
-                    node.line_start,
-                    node.line_end,
-                    props,
-                    node.valid_from,
-                    node.valid_to
-                ],
-            )?;
+            node_stmt.execute(params![
+                kind,
+                node.name,
+                node.qualified_name,
+                node.source_uri,
+                node.line_start,
+                node.line_end,
+                props,
+                node.valid_from,
+                node.valid_to,
+            ])?;
             id_map.insert(nid.0, tx.last_insert_rowid());
         }
+        drop(node_stmt);
 
         tx.execute(
             "INSERT INTO nodes_fts(rowid, kind, name, qualified_name)
@@ -191,6 +193,12 @@ impl Store {
             [],
         )?;
 
+        // Batch edge inserts with a prepared statement.
+        let mut edge_stmt = tx.prepare(
+            "INSERT INTO edges (src_id, dst_id, kind, confidence, conf_class,
+                                properties, valid_from, valid_to)
+             VALUES (?,?,?,?,?,?,?,?)",
+        )?;
         for (_eid, src, dst, edge) in graph.edges() {
             let kind = serde_json::to_value(edge.kind)?
                 .as_str()
@@ -201,22 +209,18 @@ impl Store {
             let props = serde_json::to_string(&edge.properties)?;
             let src_db = *id_map.get(&src.0).context("missing src in id map")?;
             let dst_db = *id_map.get(&dst.0).context("missing dst in id map")?;
-            tx.execute(
-                "INSERT INTO edges (src_id, dst_id, kind, confidence, conf_class,
-                                    properties, valid_from, valid_to)
-                 VALUES (?,?,?,?,?,?,?,?)",
-                params![
-                    src_db,
-                    dst_db,
-                    kind,
-                    conf_score,
-                    conf_class,
-                    props,
-                    edge.valid_from,
-                    edge.valid_to
-                ],
-            )?;
+            edge_stmt.execute(params![
+                src_db,
+                dst_db,
+                kind,
+                conf_score,
+                conf_class,
+                props,
+                edge.valid_from,
+                edge.valid_to,
+            ])?;
         }
+        drop(edge_stmt);
 
         tx.commit()?;
         if let Some(model) = existing_embedding_model {
@@ -1286,7 +1290,8 @@ mod tests {
         let mut gone = Node::new(NodeKind::Function, "m::gone");
         gone.valid_from = Some("c1".to_string());
         gone.source_uri = Some("src/a.rs".to_string());
-        s.archive_nodes(&[StoredNodeRow { node: gone }], "c2").unwrap();
+        s.archive_nodes(&[StoredNodeRow { node: gone }], "c2")
+            .unwrap();
 
         let active = s.load().unwrap();
         assert!(active.find_by_qname("m::keep").is_some());

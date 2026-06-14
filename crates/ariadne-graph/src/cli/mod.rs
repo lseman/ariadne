@@ -1,10 +1,10 @@
+pub mod git;
 /// CLI argument definitions and dispatch.
 pub mod handlers;
 pub mod helpers;
-pub mod response;
-pub mod git;
 pub mod http;
 pub mod mcp;
+pub mod response;
 
 use anyhow::Result;
 use std::path::Path;
@@ -12,7 +12,7 @@ use std::path::Path;
 /// Run the CLI with the given arguments.
 pub fn run(db: &Path, command: &handlers::Commands) -> Result<()> {
     use handlers::*;
-    
+
     match command {
         Commands::Build { path } => cmd_build(db, path),
         Commands::Update { path } => cmd_update(db, path),
@@ -89,8 +89,22 @@ pub fn run(db: &Path, command: &handlers::Commands) -> Result<()> {
         Commands::McpServer => cmd_mcp_server(db),
         Commands::GodNodes { top, seed } => cmd_god_nodes(db, *top, seed.as_deref()),
         Commands::Communities { top, algorithm } => cmd_communities(db, *top, algorithm),
+        Commands::Dedup {
+            threshold,
+            community_boost,
+            community_algo,
+        } => cmd_dedup(db, *threshold, *community_boost, community_algo.clone()),
         Commands::Flows { top } => cmd_flows(db, *top),
         Commands::AffectedFlows { base, top } => cmd_affected_flows(db, base, *top),
+        Commands::BlastRadius {
+            base,
+            max_depth,
+            top,
+        } => cmd_blast_radius(db, base, *max_depth, *top),
+        Commands::TestCoverage { base, target } => {
+            cmd_test_coverage(db, base.as_deref(), target.as_deref())
+        }
+        Commands::Report { output, top } => cmd_report(db, output, *top),
         Commands::Search { query } => cmd_search(db, query),
     }
 }
