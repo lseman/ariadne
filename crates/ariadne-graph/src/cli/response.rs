@@ -735,7 +735,24 @@ pub fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
     coupling_rows.sort_by_key(|v| std::cmp::Reverse(v["edges"].as_u64().unwrap_or_default()));
     coupling_rows.truncate(detail.limit(10));
 
-    let bridges = bridge_nodes_json(graph, detail.limit(10));
+    let bridge_rows: Vec<_> = bridge_scores(graph, &communities, detail.limit(10))
+        .into_iter()
+        .filter_map(|row| {
+            graph.node(row.node).map(|n| {
+                json!({
+                    "id": row.node.0,
+                    "score": row.score,
+                    "communities_touched": row.communities_touched,
+                    "degree": row.degree,
+                    "approx_betweenness": row.approx_betweenness,
+                    "articulation": row.articulation,
+                    "qualified_name": n.qualified_name,
+                    "kind": n.kind,
+                    "source_uri": n.source_uri,
+                })
+            })
+        })
+        .collect();
     let cycles = cycles_json(graph, detail.limit(8));
     let core = core_json(graph, detail.limit(10));
     let articulations = articulation_json(graph, detail.limit(10));
@@ -786,7 +803,7 @@ pub fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
         "community_count": by_comm.len(),
         "communities": summaries,
         "cross_community_coupling": coupling_rows,
-        "bridge_nodes": bridges["hits"].clone(),
+        "bridge_nodes": bridge_rows,
         "cycles": cycles["hits"].clone(),
         "core_nodes": core["hits"].clone(),
         "articulation_points": articulations["hits"].clone(),
@@ -1957,11 +1974,10 @@ pub fn generate_report_markdown(db: &Path, top: usize) -> Result<String> {
         })
         .unwrap_or_default();
 
-    // Communities
-    let comm = leiden(&graph);
+    // Communities (reuse the map already computed for bridges above)
     let mut by_comm: std::collections::BTreeMap<usize, Vec<String>> =
         std::collections::BTreeMap::new();
-    for (id, &c) in &comm {
+    for (id, &c) in &communities {
         if let Some(n) = graph.node(*id) {
             by_comm.entry(c).or_default().push(n.qualified_name.clone());
         }
