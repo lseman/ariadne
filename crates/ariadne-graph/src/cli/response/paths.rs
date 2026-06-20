@@ -3,10 +3,10 @@ use ariadne_graph::query::{find_top_paths, PathQuery};
 use ariadne_graph::Graph;
 use serde_json::{json, Value};
 
-use super::helpers::resolve;
-use super::response::required_str;
+use super::super::helpers::resolve;
+use super::required_str;
 
-pub(super) fn handle_paths(graph: &Graph, params: &Value) -> Result<Value> {
+pub fn handle_paths(graph: &Graph, params: &Value) -> Result<Value> {
     let from = required_str(params, "from")?;
     let to = required_str(params, "to")?;
     let max_hops = params.get("max_hops").and_then(Value::as_u64).unwrap_or(5) as usize;

@@ -3,10 +3,10 @@ use ariadne_graph::query::{analyze_impact, is_rank_noise, pagerank, personalized
 use ariadne_graph::Graph;
 use serde_json::{json, Value};
 
-use super::helpers::resolve;
-use super::response::required_str;
+use super::super::helpers::resolve;
+use super::required_str;
 
-pub(super) fn handle_impact(graph: &Graph, params: &Value) -> Result<Value> {
+pub fn handle_impact(graph: &Graph, params: &Value) -> Result<Value> {
     let target = required_str(params, "target")?;
     let max_hops = params.get("max_hops").and_then(Value::as_u64).unwrap_or(4) as usize;
     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
@@ -37,7 +37,7 @@ pub(super) fn handle_impact(graph: &Graph, params: &Value) -> Result<Value> {
     Ok(json!({ "operation": "impact", "target": target, "hits": hits }))
 }
 
-pub(super) fn handle_god_nodes(graph: &Graph, params: &Value) -> Result<Value> {
+pub fn handle_god_nodes(graph: &Graph, params: &Value) -> Result<Value> {
     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
     let ranks = if let Some(seed) = params.get("seed").and_then(Value::as_str) {
         let seed_id = resolve(graph, seed)?;

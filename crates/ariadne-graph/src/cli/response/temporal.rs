@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::git::{git_changed_diff, git_commit_hash, git_is_ancestor, ChangedFile};
-use super::helpers::{nodes_for_changed_hunk, nodes_for_changed_ranges, nodes_for_files};
+use super::super::git::{git_changed_diff, git_commit_hash, git_is_ancestor, ChangedFile};
+use super::super::helpers::{nodes_for_changed_hunk, nodes_for_changed_ranges, nodes_for_files};
 use ariadne_graph::extract::flows::affected_flows;
 
 /// Risk-scored change analysis from a git diff base.

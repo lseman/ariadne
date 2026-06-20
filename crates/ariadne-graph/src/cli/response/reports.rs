@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::analysis::{diagnostics_json, gaps_json, surprises_json};
 use super::architecture::architecture_overview_json;
-use super::response::DetailLevel;
+use super::DetailLevel;
 
 /// Generate a Markdown report from the graph and diagnostics.
 pub fn generate_report_markdown(db: &Path, top: usize) -> Result<String> {

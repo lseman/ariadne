@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::Path;
 
-use super::helpers::{resolve, source_matches};
+use super::super::helpers::{resolve, source_matches};
 use super::temporal::{detect_changes_json, nodes_json};
 
 /// Token-budgeted review context for changed and impacted files.

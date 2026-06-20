@@ -2,7 +2,7 @@ use ariadne_graph::query::ranked_search;
 use ariadne_graph::Graph;
 use serde_json::{json, Value};
 
-pub(super) fn handle_search(graph: &Graph, params: &Value) -> Value {
+pub fn handle_search(graph: &Graph, params: &Value) -> Value {
     let query = params.get("query").and_then(Value::as_str).unwrap_or("");
     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
     let hits: Vec<_> = ranked_search(graph, query, limit)

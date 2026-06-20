@@ -1,19 +1,38 @@
+mod analysis;
+mod architecture;
+mod context;
+mod flows;
+mod impact;
+mod paths;
+mod reports;
+mod reviews;
+mod search;
+mod temporal;
+
 use anyhow::{bail, Result};
 use ariadne_graph::Graph;
 use serde_json::{json, Value, Map};
 use std::collections::HashMap;
 use std::path::Path;
 
-pub(super) use super::context::minimal_context_json;
-pub(super) use super::search::handle_search;
-pub(super) use super::paths::handle_paths;
-pub(super) use super::impact::{handle_impact, handle_god_nodes};
-pub(super) use super::flows::{handle_flows, handle_affected_flows, handle_blast_radius, handle_test_coverage};
-pub(super) use super::temporal::{detect_changes_json, graph_diff_json};
-pub(super) use super::reviews::{review_context_json, traverse_json, counterfactual_json, motifs_json, suggested_questions_json};
-pub(super) use super::analysis::{large_functions_json, bridge_nodes_json, cycles_json, core_json, articulation_json, gaps_json, surprises_json, diagnostics_json};
-pub(super) use super::architecture::architecture_overview_json;
-pub(super) use super::reports::generate_report_markdown;
+pub use analysis::{
+    articulation_json, bridge_nodes_json, core_json, cycles_json, diagnostics_json,
+    gaps_json, large_functions_json, surprises_json,
+};
+pub use architecture::architecture_overview_json;
+pub use context::minimal_context_json;
+pub use flows::{
+    handle_affected_flows, handle_blast_radius, handle_flows, handle_test_coverage,
+};
+pub use impact::{handle_god_nodes, handle_impact};
+pub use paths::handle_paths;
+pub use reports::generate_report_markdown;
+pub use reviews::{
+    counterfactual_json, motifs_json, review_context_json, suggested_questions_json,
+    traverse_json,
+};
+pub use search::handle_search;
+pub use temporal::{detect_changes_json, graph_diff_json};
 
 /// One-operation JSON interface for agents and MCP wrappers.
 pub fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value> {

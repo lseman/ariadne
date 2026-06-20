@@ -4,10 +4,10 @@ use ariadne_graph::{EdgeKind, Graph, NodeKind};
 use serde_json::{json, Value};
 use std::path::Path;
 
-use super::helpers::resolve;
+use super::super::helpers::resolve;
 use super::temporal::detect_changes_json;
 
-pub(super) fn handle_flows(graph: &Graph, params: &Value) -> Value {
+pub fn handle_flows(graph: &Graph, params: &Value) -> Value {
     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
     let ids = all_flows(graph);
     let total = ids.len();
@@ -36,7 +36,7 @@ pub(super) fn handle_flows(graph: &Graph, params: &Value) -> Value {
     })
 }
 
-pub(super) fn handle_affected_flows(db: &Path, params: &Value) -> Result<Value> {
+pub fn handle_affected_flows(db: &Path, params: &Value) -> Result<Value> {
     let base = params
         .get("base")
         .and_then(Value::as_str)
@@ -62,7 +62,7 @@ pub(super) fn handle_affected_flows(db: &Path, params: &Value) -> Result<Value> 
     }))
 }
 
-pub(super) fn handle_blast_radius(db: &Path, params: &Value) -> Result<Value> {
+pub fn handle_blast_radius(db: &Path, params: &Value) -> Result<Value> {
     let base = params
         .get("base")
         .and_then(Value::as_str)
@@ -110,7 +110,7 @@ pub(super) fn handle_blast_radius(db: &Path, params: &Value) -> Result<Value> {
     }))
 }
 
-pub(super) fn handle_test_coverage(db: &Path, graph: &Graph, params: &Value) -> Result<Value> {
+pub fn handle_test_coverage(db: &Path, graph: &Graph, params: &Value) -> Result<Value> {
     let base = params
         .get("base")
         .and_then(Value::as_str)

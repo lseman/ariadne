@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 use super::analysis::{articulation_json, core_json, cycles_json};
-use super::response::DetailLevel;
+use super::DetailLevel;
 
 /// Architecture overview at community level.
 pub fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
