@@ -2,6 +2,7 @@ mod analysis;
 mod architecture;
 mod context;
 mod flows;
+mod hints;
 mod impact;
 mod paths;
 mod reports;
@@ -14,6 +15,7 @@ use ariadne_graph::Graph;
 use serde_json::{json, Value, Map};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::RwLockWriteGuard;
 
 pub use analysis::{
     articulation_json, bridge_nodes_json, core_json, cycles_json, diagnostics_json,
@@ -33,9 +35,25 @@ pub use reviews::{
 };
 pub use search::handle_search;
 pub use temporal::{detect_changes_json, graph_diff_json};
+pub use hints::SessionState;
+
+pub type ResponseSession = std::sync::RwLock<hints::SessionState>;
 
 /// One-operation JSON interface for agents and MCP wrappers.
 pub fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value> {
+    let session = Session();
+    let mut guard = session.write().unwrap();
+    let response = _tool_response(db, operation, params, &mut guard)?;
+    Ok(response)
+}
+
+/// Internal: build response with session guard held.
+fn _tool_response(
+    db: &Path,
+    operation: &str,
+    params: &Value,
+    session: &mut RwLockWriteGuard<hints::SessionState>,
+) -> Result<Value> {
     let store = ariadne_graph::store::Store::open(db)?;
     let graph = store.load()?;
     let detail = DetailLevel::from_params(params);
@@ -203,7 +221,18 @@ pub fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value
         }
         other => bail!("unknown tool operation {}", other),
     };
-    Ok(apply_response_guardrails(response, &graph, params, detail))
+    let response = apply_response_guardrails(response, &graph, params, detail);
+    // Attach hints (suppress if caller disables them)
+    if params.get("no_hints").and_then(Value::as_bool).unwrap_or(false) {
+        Ok(response)
+    } else {
+        let hints = hints::generate_hints(operation, &response, session);
+        let mut out = response.as_object().cloned().unwrap_or_default();
+        if hints != Value::Null {
+            out.insert("_hints".into(), hints);
+        }
+        Ok(Value::Object(out))
+    }
 }
 
 /// Detail level for response compactness.
@@ -395,4 +424,12 @@ pub(super) fn required_str<'a>(params: &'a Value, key: &str) -> Result<&'a str> 
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("missing string param '{}'", key))
+}
+
+/// Global response session (singleton).
+#[allow(non_snake_case)]
+pub fn Session() -> &'static ResponseSession {
+    use std::sync::{OnceLock, RwLock};
+    static SESSION: OnceLock<ResponseSession> = OnceLock::new();
+    SESSION.get_or_init(|| RwLock::new(SessionState::new()))
 }

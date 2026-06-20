@@ -44,10 +44,10 @@ pulldown-cmark = { workspace = true }
 # HTML parsing — 0.26 works on Rust 1.75; 0.27 needs 1.80+.
 html5ever = "0.26"
 markup5ever_rcdom = "0.2.0"
-tree-sitter-html = "0.20"
 # 6.x rather than 7+/8+: newer majors raise MSRV above the 1.75 pin.
 notify = "6.1"
 
+toml = { workspace = true }
 # MSRV pins for Rust 1.75 — newer transitive deps require edition2024 or 1.80+.
 # These constrain the resolver; they are not used directly in code.
 indexmap = "=2.6.0"

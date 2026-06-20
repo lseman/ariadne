@@ -37,6 +37,7 @@ impl IgnoreSet {
 pub fn extract_directory(root: &Path, graph: &mut Graph) -> Result<usize> {
     let mut count = 0usize;
     let ignore = IgnoreSet::load(root);
+    let registry = super::ast::language_registry::registry();
     for entry in WalkDir::new(root)
         .into_iter()
         .filter_entry(|e| !ignore.is_ignored(e.path()))
@@ -46,15 +47,52 @@ pub fn extract_directory(root: &Path, graph: &mut Graph) -> Result<usize> {
         if !path.is_file() {
             continue;
         }
-        if !is_supported(path) {
+        if let Some(lang_def) = registry.get_by_path(path) {
+            if let Err(e) = super::ast::custom_lang::extract_file(path, graph, lang_def) {
+                tracing::warn!("failed to extract {}: {}", path.display(), e);
+            } else {
+                count += 1;
+            }
+        }
+    }
+    resolve_call_placeholders(graph);
+    super::concept::markdown::resolve_mentions(graph);
+    derive_tested_by_edges(graph);
+    super::flows::compute_flows(graph);
+    Ok(count)
+}
+
+/// Same as `extract_directory` but with a custom language registry.
+///
+/// Custom language entries are merged on top of the global registry at
+/// runtime (useful for tests that inject ad-hoc languages).
+pub fn extract_directory_with_custom(
+    root: &Path,
+    graph: &mut Graph,
+    custom: &std::collections::HashMap<String, super::ast::language_registry::LanguageDef>,
+) -> Result<usize> {
+    let mut count = 0usize;
+    let ignore = IgnoreSet::load(root);
+    let registry = super::ast::language_registry::registry();
+    for entry in WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| !ignore.is_ignored(e.path()))
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if !path.is_file() {
             continue;
         }
-        let res = extract_file(path, graph);
-        if let Err(e) = res {
-            tracing::warn!("failed to extract {}: {}", path.display(), e);
-            continue;
+        // Check custom languages first (they override built-in extension matching)
+        let lang_def = custom.values().find(|l| l.matches_ext(path))
+            .or_else(|| registry.get_by_path(path));
+        if let Some(lang_def) = lang_def {
+            if let Err(e) = super::ast::custom_lang::extract_file(path, graph, lang_def) {
+                tracing::warn!("failed to extract {}: {}", path.display(), e);
+            } else {
+                count += 1;
+            }
         }
-        count += 1;
     }
     resolve_call_placeholders(graph);
     super::concept::markdown::resolve_mentions(graph);
@@ -67,23 +105,39 @@ pub fn ignore_set(root: &Path) -> IgnoreSet {
     IgnoreSet::load(root)
 }
 
+/// Extract a single file — dispatches to the language-specific extractor
+/// based on file extension.
 pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
-    match path.extension().and_then(|s| s.to_str()) {
-        Some("rs") => super::ast::rust::extract_file(path, graph),
-        Some("py") => super::ast::python::extract_file(path, graph),
-        Some("ts") | Some("tsx") | Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => {
-            super::ast::typescript::extract_file(path, graph)
-        }
-        Some("c") | Some("cc") | Some("cpp") | Some("cxx") | Some("h") | Some("hh")
-        | Some("hpp") | Some("hxx") => super::ast::cpp::extract_file(path, graph),
-        Some("md") | Some("markdown") => super::concept::markdown::extract_file(path, graph),
-        Some("tex") => super::concept::latex::extract_file(path, graph),
-        Some("html") | Some("htm") => super::concept::html::extract_file(path, graph),
-        Some("svg") => super::vision::svg::extract_file(path, graph),
-        _ => Ok(()),
+    let registry = super::ast::language_registry::registry();
+    if let Some(lang_def) = registry.get_by_path(path) {
+        super::ast::custom_lang::extract_file(path, graph, lang_def)
+    } else {
+        Ok(())
     }
 }
 
+/// Extract a single file with optional custom language support.
+pub fn extract_file_with_custom(
+    path: &Path,
+    graph: &mut Graph,
+    custom: &std::collections::HashMap<String, super::ast::language_registry::LanguageDef>,
+) -> Result<()> {
+    // Check custom languages first (they override built-in)
+    if let Some(lang_def) = custom.values().find(|l| l.matches_ext(path)) {
+        super::ast::custom_lang::extract_file(path, graph, lang_def)
+    } else {
+        let registry = super::ast::language_registry::registry();
+        if let Some(lang_def) = registry.get_by_path(path) {
+            super::ast::custom_lang::extract_file(path, graph, lang_def)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Built-in file extensions that are always supported, regardless of
+/// TOML config. Document languages (markdown, HTML, SVG, LaTeX) live
+/// outside the AST pass and use their own extractors.
 pub fn is_supported(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|s| s.to_str()),
@@ -113,15 +167,19 @@ pub fn is_supported(path: &Path) -> bool {
     )
 }
 
+/// Check if a path matches any custom language extension.
+pub fn is_custom_supported(
+    path: &Path,
+    custom: &std::collections::HashMap<String, super::ast::language_registry::LanguageDef>,
+) -> bool {
+    custom.values().any(|lang| lang.matches_ext(path))
+}
+
 /// True when a filesystem event on `path` could change the graph: the
 /// file is a supported source type, no component under `root` is a
 /// default-ignored directory, and the ignore set does not match.
-///
-/// Unlike directory walking — where `filter_entry` prunes ignored
-/// directories before descending — event paths arrive fully formed, so
-/// every intermediate component must be checked.
 pub fn is_relevant_source(root: &Path, path: &Path, ignore: &IgnoreSet) -> bool {
-    if !is_supported(path) {
+    if !is_supported(path) && !is_custom_supported(path, &Default::default()) {
         return false;
     }
     let rel = path.strip_prefix(root).unwrap_or(path);
