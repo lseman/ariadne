@@ -5,6 +5,16 @@ pub mod helpers;
 pub mod http;
 pub mod mcp;
 pub mod response;
+pub mod context;
+pub mod search;
+pub mod paths;
+pub mod impact;
+pub mod architecture;
+pub mod temporal;
+pub mod reviews;
+pub mod flows;
+pub mod analysis;
+pub mod reports;
 
 use anyhow::Result;
 use std::path::Path;
