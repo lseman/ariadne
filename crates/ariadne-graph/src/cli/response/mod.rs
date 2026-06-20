@@ -13,7 +13,7 @@ mod temporal;
 use anyhow::{bail, Result};
 use ariadne_graph::Graph;
 use serde_json::{json, Value, Map};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::RwLockWriteGuard;
 
@@ -259,6 +259,120 @@ fn _tool_response(
             std::fs::write(output, &xml)?;
             compact_for_detail(
                 json!({ "operation": "export_graphml", "output": output, "format": "graphml", "written": true, "size": xml.len() }),
+                detail,
+            )
+        }
+        "find_related" => {
+            let target = required_str(params, "target")?;
+            let line = params.get("line").and_then(Value::as_u64).map(|v| v as u32);
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+            let store = ariadne_graph::store::Store::open(db)?;
+            let hits = ariadne_graph::query::find_related(&store, &graph, target, line, limit);
+            let rows: Vec<_> = hits
+                .into_iter()
+                .map(|h| {
+                    json!({
+                        "id": h.id.0,
+                        "qualified_name": h.qualified_name,
+                        "name": h.name,
+                        "kind": h.kind,
+                        "file": h.file,
+                        "line_start": h.line_start,
+                        "score": h.score,
+                    })
+                })
+                .collect();
+            compact_for_detail(
+                json!({ "operation": "find_related", "target": target, "hits": rows }),
+                detail,
+            )
+        }
+        "rename_preview" => {
+            let target = required_str(params, "target")?;
+            let new_name = required_str(params, "new_name")?;
+            let preview = ariadne_graph::query::rename_preview(&graph, target, &new_name)
+                .ok_or_else(|| anyhow::anyhow!("node not found: {}", target))?;
+            let edits: Vec<_> = preview.edits.iter().map(|e| {
+                json!({
+                    "file": e.file,
+                    "line": e.line,
+                    "old": e.old,
+                    "new": e.new,
+                    "confidence": match e.confidence {
+                        ariadne_graph::query::Confidence::High => "high",
+                        ariadne_graph::query::Confidence::Medium => "medium",
+                        ariadne_graph::query::Confidence::Low => "low",
+                    },
+                })
+            }).collect();
+            compact_for_detail(
+                json!({
+                    "operation": "rename_preview",
+                    "target": preview.target_qname,
+                    "target_name": preview.target_name,
+                    "new_name": preview.new_name,
+                    "target_kind": preview.target_kind,
+                    "edits": edits,
+                    "stats": {
+                        "high": preview.stats.high,
+                        "medium": preview.stats.medium,
+                        "low": preview.stats.low,
+                        "total": preview.stats.total,
+                    },
+                }),
+                detail,
+            )
+        }
+        "dead_code" => {
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
+            let dead = ariadne_graph::query::find_dead_code(&graph, limit);
+            compact_for_detail(
+                json!({ "operation": "dead_code", "dead_nodes": dead, "total_dead": dead.len() }),
+                detail,
+            )
+        }
+        "community_split" => {
+            let threshold = params
+                .get("threshold")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.25);
+            let min_size = params
+                .get("min_size")
+                .and_then(Value::as_u64)
+                .unwrap_or(10) as usize;
+            let original = ariadne_graph::query::leiden(&graph);
+            let split = ariadne_graph::query::split_oversized(&graph, threshold, min_size);
+
+            // Count splits
+            let orig_communities: HashSet<usize> = original.values().copied().collect();
+            let split_communities: HashSet<usize> = split.values().copied().collect();
+            let new_communities = split_communities.difference(&orig_communities).count();
+
+            // Build summary per community
+            let mut size_map: HashMap<usize, Vec<&str>> = HashMap::new();
+            for (id, &cid) in &split {
+                if let Some(node) = graph.node(*id) {
+                    size_map.entry(cid).or_default().push(&node.qualified_name);
+                }
+            }
+            let communities: Vec<_> = size_map
+                .into_iter()
+                .map(|(cid, members)| {
+                    json!({
+                        "id": cid,
+                        "size": members.len(),
+                        "sample": members.into_iter().take(5).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            compact_for_detail(
+                json!({
+                    "operation": "community_split",
+                    "threshold": threshold,
+                    "min_size": min_size,
+                    "new_communities": new_communities,
+                    "communities": communities,
+                }),
                 detail,
             )
         }

@@ -85,6 +85,10 @@ Ariadne is already useful as a local codebase map, an agent context server, and 
 | Knowledge gaps | working — isolated nodes, untested hotspots, thin communities, single-file communities |
 | Hub detection | working — highest-degree nodes (complements bridge nodes) |
 | GraphML export | working — Gephi, yEd, Cytoscape compatible |
+| Semantic search (find_related) | working — embedding-based similarity for files/lines |
+| Rename preview | working — definition + call sites + import sites analysis |
+| Dead code detection | working — no callers, imports, tests, or references |
+| Community auto-split | working — oversized communities (>25%) recursively split via Leiden |
 | Dedup | working — normalization → entropy → MinHash/LSH → Jaro-Winkler |
 | Custom language support | working — TOML config for adding languages via `.ariadne/languages.toml` |
 | Hints system | working — session-tracked next-step suggestions after tool calls |
@@ -297,6 +301,10 @@ Supported operations:
 | `hub_nodes` | | `limit` | Highest-degree nodes (different from bridge nodes which use betweenness centrality) |
 | `knowledge_gaps` | | `limit` | Structural weaknesses: isolated nodes, untested hotspots, thin communities, single-file communities |
 | `export_graphml` | | `output` | Export graph as GraphML XML (for Gephi, yEd, Cytoscape) |
+| `find_related` | `target`, `line`, `limit` | Semantically similar nodes to a target file/line using embeddings |
+| `rename_preview` | `target`, `new_name` | Rename impact analysis: definition + call sites + import sites |
+| `dead_code` | `limit` | Functions/classes with no callers, no imports, no tests, no references |
+| `community_split` | `threshold`, `min_size` | Recursively split oversized communities (>25% of graph) via Leiden |
 
 ## MCP Server
 

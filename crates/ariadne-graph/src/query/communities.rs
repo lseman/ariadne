@@ -1565,6 +1565,91 @@ pub fn knowledge_gaps(graph: &Graph) -> Value {
     })
 }
 
+/// Split communities that exceed a threshold percentage of total nodes.
+///
+/// Uses Leiden on the subgraph of oversized communities to recursively
+/// split them into smaller, more coherent groups. This prevents single
+/// mega-communities in large repos.
+///
+/// * `graph` — the full graph
+/// * `threshold_pct` — fraction of total nodes above which a community is
+///   considered oversized (default: 0.25 = 25%)
+/// * `min_size` — minimum number of members after splitting
+///
+/// Returns a new community map where oversized communities have been
+/// subdivided. Community IDs are remapped to avoid collisions with the
+/// original IDs.
+pub fn split_oversized(
+    graph: &Graph,
+    threshold_pct: f64,
+    min_size: usize,
+) -> HashMap<NodeId, usize> {
+    let communities = leiden(graph);
+    let total: usize = graph.nodes().count();
+    let threshold = (total as f64 * threshold_pct).max(min_size as f64) as usize;
+
+    // Find oversized communities
+    let mut size_map: HashMap<usize, Vec<NodeId>> = HashMap::new();
+    for (id, &cid) in &communities {
+        size_map.entry(cid).or_default().push(*id);
+    }
+
+    let mut next_id = (size_map.keys().copied().max().unwrap_or(0) + 1000) as usize;
+    let mut result = communities.clone();
+
+    for (cid, members) in &size_map {
+        if members.len() <= threshold {
+            continue;
+        }
+
+        // Build subgraph from oversized community
+        let member_set: std::collections::HashSet<NodeId> = members.iter().cloned().collect();
+        let mut subgraph = crate::core::Graph::new();
+        let mut id_map: HashMap<NodeId, crate::core::NodeId> = HashMap::new();
+        for &mid in members {
+            if let Some(node) = graph.node(mid) {
+                let sub_id = subgraph.add_node(node.clone());
+                id_map.insert(mid, sub_id);
+            }
+        }
+
+        // Add edges within the community
+        for (_, src, dst, edge) in graph.edges() {
+            if member_set.contains(&src) && member_set.contains(&dst) {
+                if let (Some(&s), Some(&d)) = (id_map.get(&src), id_map.get(&dst)) {
+                    subgraph.add_edge(s, d, edge.clone());
+                }
+            }
+        }
+
+        // Run leiden on subgraph
+        let sub_communities = leiden(&subgraph);
+
+        // Remap sub-community IDs to global IDs
+        let mut sub_size_map: HashMap<usize, Vec<crate::core::NodeId>> = HashMap::new();
+        for (sub_id, &scid) in &sub_communities {
+            sub_size_map.entry(scid).or_default().push(*sub_id);
+        }
+
+        for (_scid, sub_members) in &sub_size_map {
+            let new_cid = if sub_members.len() >= min_size {
+                let cid_val = next_id;
+                next_id += 1;
+                cid_val
+            } else {
+                *cid // keep original
+            };
+            for sub_id in sub_members {
+                if let Some(&orig_id) = id_map.get(sub_id) {
+                    result.insert(orig_id, new_cid);
+                }
+            }
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

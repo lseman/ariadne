@@ -880,7 +880,8 @@ pub fn edge_identity(src_qname: &str, dst_qname: &str, kind: EdgeKind) -> String
     format!("{}\u{1f}{}\u{1f}{:?}", src_qname, dst_qname, kind)
 }
 
-fn semantic_embedding(text: &str) -> Vec<f32> {
+/// Build a local feature-hash embedding for a text string.
+pub fn semantic_embedding(text: &str) -> Vec<f32> {
     let mut vector = vec![0.0; DEFAULT_EMBEDDING_DIM];
     let tokens = semantic_tokens(text);
     if tokens.is_empty() {
