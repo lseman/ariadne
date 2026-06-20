@@ -36,6 +36,7 @@ Ariadne is already useful as a local codebase map, an agent context server, and 
 | Graph reasoning | Weighted paths, callers/callees, impact ranking, traversal, PageRank, personalized PageRank, communities, bridge nodes, k-core, cycles, articulation points, surprises, architecture summaries, and counterfactual reachability |
 | History | Incremental updates, file hashes, active/archive rows, temporal `valid_from` / `valid_to` windows, and graph diff between git refs |
 | Automation | Event-driven watch mode (inotify/FSEvents, polling fallback), daemon-managed repositories, git hooks, and editor config installers for Claude Code, Cursor, VS Code, and Codex |
+| Extensibility | TOML-based custom language support (`.ariadne/languages.toml`), session-tracked hints system that suggests next-step operations after tool calls |
 | Dedup | Multi-pass pipeline (normalization → entropy gate → MinHash/LSH → Jaro-Winkler) to merge semantically equivalent concept/document/diagram nodes |
 
 ## How It Works
@@ -67,7 +68,7 @@ Ariadne is already useful as a local codebase map, an agent context server, and 
 | Hybrid / fuzzy search | working |
 | Weighted top-k paths | working |
 | Personalized PageRank | working |
-| Louvain / Leiden communities | working |
+| Louvain / Leiden / Infomap communities | working |
 | Impact analysis | working |
 | Review / change analysis | working — hunk-to-symbol diff mapping |
 | Test awareness | working — `TestedBy` edges and missing-test reporting |
@@ -82,6 +83,8 @@ Ariadne is already useful as a local codebase map, an agent context server, and 
 | Performance guardrails | working — response budgets, pagination, graph summaries |
 | Motifs / counterfactuals | working — VF2 subgraph isomorphism |
 | Dedup | working — normalization → entropy → MinHash/LSH → Jaro-Winkler |
+| Custom language support | working — TOML config for adding languages via `.ariadne/languages.toml` |
+| Hints system | working — session-tracked next-step suggestions after tool calls |
 
 ## Quick Start
 
@@ -104,6 +107,8 @@ C / C++    .c .cc .cpp .cxx .h .hh .hpp .hxx
 Docs       .md .markdown (.tex stub)
 Diagrams   .svg
 ```
+
+Add custom languages with `.ariadne/languages.toml` — see `extract/ast/languages.toml` for the schema.
 
 Launch the interactive terminal UI:
 
@@ -419,9 +424,8 @@ All commands accept `--db path/to/ariadne.db` (default: `ariadne.db`).
 | `ariadne surprises` | `--top 25` | Ranks unexpected cross-community, cross-language, and hub-coupling edges |
 | `ariadne architecture` | `--detail-level standard` | Summarizes communities, bridges, coupling, and architecture-level signals |
 | `ariadne god-nodes` | `--top 10`, `--seed SYMBOL` | Ranks global or seed-biased PageRank nodes |
-| `ariadne communities` | `--top 20`, `--algorithm louvain\|leiden` | Detects graph communities using Louvain or Leiden clustering |
-| `ariadne dedup` | `--threshold 0.92`, `--community-boost`, `--community-algo louvain` | Runs the multi-pass dedup pipeline (normalization → entropy gate → MinHash/LSH → Jaro-Winkler) to merge semantically equivalent nodes |
-| `ariadne blast-radius` | `--base HEAD~1`, `--max-depth 2`, `--top 25` | Compact changed files, symbols, impacted nodes, risk score, and coverage |
+| `ariadne communities` | `--top 20`, `--algorithm louvain\|leiden\|infomap` | Detects graph communities using Louvain, Leiden, or Infomap clustering |
+| `ariadne dedup` | `--threshold 0.92`, `--community-boost 0.05`, `--community-algo louvain` | Runs the multi-pass dedup pipeline (normalization → entropy gate → MinHash/LSH → Jaro-Winkler) to merge semantically equivalent nodes |
 | `ariadne test-coverage` | `--base HEAD~1` or `TARGET` | Test coverage for changed symbols or a specific target |
 | `ariadne report <output>` | `--top 25` | Writes a Markdown report: health, index coverage, architecture, top nodes, bridges, gaps, surprises |
 | `ariadne flows` | `--top 20` | Lists execution flows ranked by criticality |
@@ -453,7 +457,7 @@ ariadne/
 
 ## Design Notes
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the longer rationale.
+The codebase is a single Rust crate (`crates/ariadne-graph`) with modules for core graph types, extraction, query/analysis, store, TUI, and CLI. See the source for details.
 
 ## License
 
