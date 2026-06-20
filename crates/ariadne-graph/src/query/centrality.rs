@@ -41,54 +41,84 @@ fn weighted_pagerank(
 ) -> HashMap<NodeId, f32> {
     let nodes: Vec<NodeId> = graph.nodes().map(|(id, _)| id).collect();
     let n = nodes.len();
-    let mut ranks: HashMap<NodeId, f32> = HashMap::with_capacity(n);
     if n == 0 {
-        return ranks;
+        return HashMap::new();
     }
+    let node_index: HashMap<NodeId, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(idx, id)| (*id, idx))
+        .collect();
     let init = 1.0 / n as f32;
-    for &id in &nodes {
-        ranks.insert(id, init);
-    }
+    let mut ranks = vec![init; n];
 
+    let transitions = weighted_transitions(graph, &nodes, &node_index);
+    let personalization = personalization_vector(&nodes, personalization);
     let uniform = 1.0 / n as f32;
-    let has_personalization = !personalization.is_empty();
+    let has_personalization = personalization.iter().any(|weight| *weight > 0.0);
     for _ in 0..iterations {
-        let mut next: HashMap<NodeId, f32> = HashMap::with_capacity(n);
-        for &id in &nodes {
-            let p = if has_personalization {
-                personalization.get(&id).copied().unwrap_or(0.0)
-            } else {
-                uniform
-            };
-            next.insert(id, (1.0 - damping) * p);
-        }
+        let mut next: Vec<_> = if has_personalization {
+            personalization
+                .iter()
+                .map(|p| (1.0 - damping) * p)
+                .collect()
+        } else {
+            vec![(1.0 - damping) * uniform; n]
+        };
         let mut dangling_mass = 0.0f32;
-        for &id in &nodes {
-            let out: Vec<(NodeId, f32)> = graph
-                .out_neighbors(id)
-                .filter(|(_, e)| !matches!(e.confidence, Confidence::Ambiguous))
-                .map(|(n, e)| (n, edge_weight(e.kind) * e.confidence.score().max(0.05)))
-                .collect();
-            if out.is_empty() {
-                dangling_mass += ranks[&id];
+        for (idx, out) in transitions.iter().enumerate() {
+            if out.edges.is_empty() {
+                dangling_mass += ranks[idx];
                 continue;
             }
-            let total_weight: f32 = out.iter().map(|(_, w)| *w).sum();
-            for (n_id, weight) in out {
-                *next.entry(n_id).or_insert(0.0) += damping * ranks[&id] * weight / total_weight;
+            for &(neighbor_idx, weight) in &out.edges {
+                next[neighbor_idx] += damping * ranks[idx] * weight / out.total;
             }
         }
-        for &id in &nodes {
+        for idx in 0..n {
             let p = if has_personalization {
-                personalization.get(&id).copied().unwrap_or(0.0)
+                personalization[idx]
             } else {
                 uniform
             };
-            *next.entry(id).or_insert(0.0) += damping * dangling_mass * p;
+            next[idx] += damping * dangling_mass * p;
         }
         ranks = next;
     }
-    ranks
+    nodes.into_iter().zip(ranks).collect()
+}
+
+struct WeightedTransitions {
+    edges: Vec<(usize, f32)>,
+    total: f32,
+}
+
+fn weighted_transitions(
+    graph: &Graph,
+    nodes: &[NodeId],
+    node_index: &HashMap<NodeId, usize>,
+) -> Vec<WeightedTransitions> {
+    let mut transitions = Vec::with_capacity(nodes.len());
+    for &id in nodes {
+        let edges: Vec<_> = graph
+            .out_neighbors(id)
+            .filter(|(_, e)| !matches!(e.confidence, Confidence::Ambiguous))
+            .filter_map(|(n, e)| {
+                let idx = node_index.get(&n)?;
+                Some((*idx, edge_weight(e.kind) * e.confidence.score().max(0.05)))
+            })
+            .collect();
+        let total = edges.iter().map(|(_, weight)| *weight).sum();
+        transitions.push(WeightedTransitions { edges, total });
+    }
+    transitions
+}
+
+fn personalization_vector(nodes: &[NodeId], personalization: &HashMap<NodeId, f32>) -> Vec<f32> {
+    nodes
+        .iter()
+        .map(|id| personalization.get(id).copied().unwrap_or(0.0))
+        .collect()
 }
 
 fn edge_weight(kind: EdgeKind) -> f32 {
@@ -161,5 +191,18 @@ mod tests {
         g.add_edge(c, b, Edge::extracted(EdgeKind::Calls));
         let ranks = personalized_pagerank(&g, &[(a, 1.0)], 0.85, 30);
         assert!(ranks[&a] > ranks[&c]);
+    }
+
+    #[test]
+    fn pagerank_ignores_unresolved_placeholders() {
+        let mut g = Graph::new();
+        let real = g.add_node(Node::new(NodeKind::Function, "real"));
+        let caller = g.add_node(Node::new(NodeKind::Function, "caller"));
+        let placeholder = g.add_node(Node::new(NodeKind::Function, "call::missing"));
+        g.add_edge(caller, real, Edge::extracted(EdgeKind::Calls));
+        g.add_edge(caller, placeholder, Edge::ambiguous(EdgeKind::Calls));
+
+        let ranks = pagerank(&g, 0.85, 30);
+        assert!(ranks[&real] > ranks[&placeholder]);
     }
 }

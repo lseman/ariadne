@@ -1,0 +1,130 @@
+{
+  "name": "ariadne",
+  "displayName": "Ariadne - Code Graph Explorer",
+  "description": "Explore codebases using Ariadne's code graph — search, impact analysis, dependency traversal",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ariadne.search",
+        "title": "Ariadne: Search Graph",
+        "icon": "$(search)"
+      },
+      {
+        "command": "ariadne.minimal_context",
+        "title": "Ariadne: Get Code Context",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "ariadne.impact",
+        "title": "Ariadne: Impact Analysis",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "ariadne.traverse",
+        "title": "Ariadne: Traverse Dependencies",
+        "icon": "$(project)"
+      },
+      {
+        "command": "ariadne.paths",
+        "title": "Ariadne: Find Paths Between Symbols",
+        "icon": "$(link)"
+      },
+      {
+        "command": "ariadne.architecture",
+        "title": "Ariadne: Show Architecture Overview",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "ariadne.bridge_nodes",
+        "title": "Ariadne: Find Bridge Nodes",
+        "icon": "$(git-merge)"
+      },
+      {
+        "command": "ariadne.gaps",
+        "title": "Ariadne: Find Gaps",
+        "icon": "$(warning)"
+      },
+      {
+        "command": "ariadne.core",
+        "title": "Ariadne: Show Core Nodes",
+        "icon": "$(star-empty)"
+      },
+      {
+        "command": "ariadne.cycles",
+        "title": "Ariadne: Find Cycles",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "ariadne.diagnostics",
+        "title": "Ariadne: Run Diagnostics",
+        "icon": "$(output)"
+      },
+      {
+        "command": "ariadne.configure",
+        "title": "Ariadne: Configure",
+        "icon": "$(gear)"
+      }
+    ],
+    "views": {
+      "ariadne": [
+        {
+          "id": "ariadne.search",
+          "name": "Search",
+          "icon": "$(search)"
+        },
+        {
+          "id": "ariadne.operations",
+          "name": "Operations",
+          "icon": "$(graph)"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ariadne",
+          "title": "Ariadne",
+          "icon": "$(graph)"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Ariadne",
+      "properties": {
+        "ariadne.binaryPath": {
+          "type": "string",
+          "description": "Path to the ariadne binary. Leave empty to use 'ariadne' from PATH.",
+          "default": ""
+        },
+        "ariadne.dbPath": {
+          "type": "string",
+          "description": "Path to the Ariadne SQLite database file.",
+          "default": ""
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "20.x",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.0"
+  }
+}

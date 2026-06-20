@@ -402,6 +402,7 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "chars"
             | "clone"
             | "cloned"
+            | "clamp"
             | "collect"
             | "contains"
             | "copied"
@@ -419,13 +420,16 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "fold"
             | "from"
             | "get"
+            | "index"
             | "insert"
             | "into"
             | "into_iter"
             | "is_empty"
+            | "is_none"
             | "iter_mut"
             | "join"
             | "last"
+            | "lines"
             | "map_err"
             | "new"
             | "none"
@@ -436,6 +440,7 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "position"
             | "push"
             | "push_str"
+            | "rsplit"
             | "some"
             | "split"
             | "splitn"
@@ -443,12 +448,24 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "take"
             | "to_owned"
             | "to_string"
+            | "to_string_lossy"
             | "trim"
             | "unwrap"
             | "unwrap_or"
             | "unwrap_or_default"
             | "unwrap_or_else"
             | "with_capacity"
+            // Common graph-library traversal/mutation helpers. Keeping
+            // these out of the code graph prevents external petgraph calls
+            // from masquerading as unresolved project calls.
+            | "contains_node"
+            | "edge_indices"
+            | "edge_references"
+            | "edge_weight_mut"
+            | "edges_directed"
+            | "node_indices"
+            | "node_weight"
+            | "node_weight_mut"
             // C/C++ and libc-style calls.
             | "malloc"
             | "free"
@@ -1280,6 +1297,10 @@ pub fn entry() -> u32 { beta::shared() }
     #[test]
     fn suppresses_low_signal_call_placeholders_before_resolution() {
         assert!(should_suppress_call_placeholder("len"));
+        assert!(should_suppress_call_placeholder("rsplit"));
+        assert!(should_suppress_call_placeholder("to_string_lossy"));
+        assert!(should_suppress_call_placeholder("edges_directed"));
+        assert!(should_suppress_call_placeholder("node_weight_mut"));
         assert!(should_suppress_call_placeholder("unwrap_or"));
         assert!(should_suppress_call_placeholder("printf"));
         assert!(!should_suppress_call_placeholder(

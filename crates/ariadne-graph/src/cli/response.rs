@@ -214,26 +214,25 @@ fn handle_paths(graph: &Graph, params: &Value) -> Result<Value> {
     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
     let from_id = resolve(graph, from)?;
     let to_id = resolve(graph, to)?;
-    let paths: Vec<_> =
-        find_top_paths(graph, &PathQuery::between(from_id, to_id, max_hops), limit)
-            .into_iter()
-            .map(|path| {
-                let nodes: Vec<_> = path
-                    .nodes
-                    .into_iter()
-                    .filter_map(|id| {
-                        graph.node(id).map(|n| {
-                            json!({
-                                "id": id.0,
-                                "qualified_name": n.qualified_name,
-                                "kind": n.kind,
-                            })
+    let paths: Vec<_> = find_top_paths(graph, &PathQuery::between(from_id, to_id, max_hops), limit)
+        .into_iter()
+        .map(|path| {
+            let nodes: Vec<_> = path
+                .nodes
+                .into_iter()
+                .filter_map(|id| {
+                    graph.node(id).map(|n| {
+                        json!({
+                            "id": id.0,
+                            "qualified_name": n.qualified_name,
+                            "kind": n.kind,
                         })
                     })
-                    .collect();
-                json!({ "cost": path.cost, "nodes": nodes })
-            })
-            .collect();
+                })
+                .collect();
+            json!({ "cost": path.cost, "nodes": nodes })
+        })
+        .collect();
     Ok(json!({ "operation": "paths", "paths": paths }))
 }
 
@@ -533,6 +532,14 @@ impl DetailLevel {
             Self::Full => standard.saturating_mul(4),
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Standard => "standard",
+            Self::Full => "full",
+        }
+    }
 }
 
 fn compact_for_detail(mut value: Value, detail: DetailLevel) -> Value {
@@ -686,6 +693,37 @@ pub fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
     }
     let cohesion = ariadne_graph::query::community_cohesion(graph, &communities);
 
+    let summaries = community_summaries_json(graph, &by_comm, &cohesion, detail);
+    let coupling_rows = cross_community_coupling_json(graph, &communities, detail);
+    let bridge_rows = bridge_rows_json(graph, &communities, detail.limit(10));
+    let cycles = cycles_json(graph, detail.limit(8));
+    let core = core_json(graph, detail.limit(10));
+    let articulations = articulation_json(graph, detail.limit(10));
+    let warnings = architecture_warnings_json(&coupling_rows, &by_comm, &cohesion);
+
+    json!({
+        "operation": "architecture_overview",
+        "detail_level": detail.as_str(),
+        "node_count": graph.node_count(),
+        "edge_count": graph.edge_count(),
+        "community_count": by_comm.len(),
+        "communities": summaries,
+        "cross_community_coupling": coupling_rows,
+        "bridge_nodes": bridge_rows,
+        "cycles": cycles["hits"].clone(),
+        "core_nodes": core["hits"].clone(),
+        "articulation_points": articulations["hits"].clone(),
+        "warnings": warnings,
+        "suggested_next_tools": ["bridge_nodes", "cycles", "core", "articulation_points", "traverse", "impact", "gaps"]
+    })
+}
+
+fn community_summaries_json(
+    graph: &Graph,
+    by_comm: &HashMap<usize, Vec<NodeId>>,
+    cohesion: &HashMap<usize, f32>,
+    detail: DetailLevel,
+) -> Vec<Value> {
     let mut summaries: Vec<_> = by_comm
         .iter()
         .map(|(community, members)| {
@@ -714,7 +752,14 @@ pub fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
         .collect();
     summaries.sort_by_key(|v| std::cmp::Reverse(v["size"].as_u64().unwrap_or_default()));
     summaries.truncate(detail.limit(12));
+    summaries
+}
 
+fn cross_community_coupling_json(
+    graph: &Graph,
+    communities: &HashMap<NodeId, usize>,
+    detail: DetailLevel,
+) -> Vec<Value> {
     let mut coupling: HashMap<(usize, usize), usize> = HashMap::new();
     for (_, src, dst, _) in graph.edges() {
         let Some(a) = communities.get(&src).copied() else {
@@ -728,14 +773,21 @@ pub fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
             *coupling.entry(key).or_insert(0) += 1;
         }
     }
-    let mut coupling_rows: Vec<_> = coupling
+    let mut rows: Vec<_> = coupling
         .into_iter()
         .map(|((a, b), edges)| json!({"from": a, "to": b, "edges": edges}))
         .collect();
-    coupling_rows.sort_by_key(|v| std::cmp::Reverse(v["edges"].as_u64().unwrap_or_default()));
-    coupling_rows.truncate(detail.limit(10));
+    rows.sort_by_key(|v| std::cmp::Reverse(v["edges"].as_u64().unwrap_or_default()));
+    rows.truncate(detail.limit(10));
+    rows
+}
 
-    let bridge_rows: Vec<_> = bridge_scores(graph, &communities, detail.limit(10))
+fn bridge_rows_json(
+    graph: &Graph,
+    communities: &HashMap<NodeId, usize>,
+    limit: usize,
+) -> Vec<Value> {
+    bridge_scores(graph, communities, limit)
         .into_iter()
         .filter_map(|row| {
             graph.node(row.node).map(|n| {
@@ -752,10 +804,14 @@ pub fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
                 })
             })
         })
-        .collect();
-    let cycles = cycles_json(graph, detail.limit(8));
-    let core = core_json(graph, detail.limit(10));
-    let articulations = articulation_json(graph, detail.limit(10));
+        .collect()
+}
+
+fn architecture_warnings_json(
+    coupling_rows: &[Value],
+    by_comm: &HashMap<usize, Vec<NodeId>>,
+    cohesion: &HashMap<usize, f32>,
+) -> Vec<Value> {
     let mut warnings: Vec<_> = coupling_rows
         .iter()
         .take(5)
@@ -790,26 +846,7 @@ pub fn architecture_overview_json(graph: &Graph, detail: DetailLevel) -> Value {
             "cohesion": score,
         }));
     }
-
-    json!({
-        "operation": "architecture_overview",
-        "detail_level": match detail {
-            DetailLevel::Minimal => "minimal",
-            DetailLevel::Standard => "standard",
-            DetailLevel::Full => "full",
-        },
-        "node_count": graph.node_count(),
-        "edge_count": graph.edge_count(),
-        "community_count": by_comm.len(),
-        "communities": summaries,
-        "cross_community_coupling": coupling_rows,
-        "bridge_nodes": bridge_rows,
-        "cycles": cycles["hits"].clone(),
-        "core_nodes": core["hits"].clone(),
-        "articulation_points": articulations["hits"].clone(),
-        "warnings": warnings,
-        "suggested_next_tools": ["bridge_nodes", "cycles", "core", "articulation_points", "traverse", "impact", "gaps"]
-    })
+    warnings
 }
 
 /// Risk-scored change analysis from a git diff base.

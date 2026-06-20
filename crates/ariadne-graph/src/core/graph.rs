@@ -159,20 +159,15 @@ impl Graph {
             .find(|ei| ei.index() == id.0 as usize)
     }
 
-    /// Remove an edge by index. Rebuilds the qname index.
+    /// Remove an edge by index.
     pub fn remove_edge(&mut self, idx: EdgeIndex) {
         self.inner.remove_edge(idx);
-        self.by_qname = rebuild_qname_index(&self.inner);
     }
 
-    /// Remove a batch of edges by stable id. Rebuilds the qname index
-    /// once, unlike repeated [`Graph::remove_edge`] calls.
+    /// Remove a batch of edges by stable id.
     pub fn remove_edges_by_id(&mut self, ids: &[EdgeId]) {
         for id in ids {
             self.inner.remove_edge(EdgeIndex::new(id.0 as usize));
-        }
-        if !ids.is_empty() {
-            self.by_qname = rebuild_qname_index(&self.inner);
         }
     }
 
@@ -313,5 +308,21 @@ mod tests {
         let a2 = g.add_node(Node::new(NodeKind::Function, "m::f"));
         assert_eq!(a, a2);
         assert_eq!(g.node_count(), 1);
+    }
+
+    #[test]
+    fn removing_edges_preserves_qname_index() {
+        let mut g = Graph::new();
+        let a = g.add_node(Node::new(NodeKind::Function, "m::f"));
+        let b = g.add_node(Node::new(NodeKind::Function, "m::g"));
+        let edge = g.add_edge(a, b, Edge::extracted(EdgeKind::Calls));
+        let edge2 = g.add_edge(b, a, Edge::extracted(EdgeKind::Calls));
+
+        g.remove_edges_by_id(&[edge]);
+        g.remove_edge(g.edge_index(edge2).unwrap());
+
+        assert_eq!(g.edge_count(), 0);
+        assert_eq!(g.find_by_qname("m::f"), Some(a));
+        assert_eq!(g.find_by_qname("m::g"), Some(b));
     }
 }
