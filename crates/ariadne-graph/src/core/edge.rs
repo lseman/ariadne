@@ -46,6 +46,26 @@ pub enum EdgeKind {
 }
 
 impl EdgeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Defines => "defines",
+            Self::Calls => "calls",
+            Self::Imports => "imports",
+            Self::Inherits => "inherits",
+            Self::Implements => "implements",
+            Self::ReadsWrites => "reads_writes",
+            Self::TestedBy => "tested_by",
+            Self::MemberOf => "member_of",
+            Self::EntryOf => "entry_of",
+            Self::Mentions => "mentions",
+            Self::Describes => "describes",
+            Self::SimilarTo => "similar_to",
+            Self::RationaleFor => "rationale_for",
+            Self::Illustrates => "illustrates",
+            Self::DocumentedBy => "documented_by",
+        }
+    }
+
     pub fn is_structural(&self) -> bool {
         matches!(
             self,

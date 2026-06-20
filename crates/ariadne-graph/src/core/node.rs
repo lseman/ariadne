@@ -40,6 +40,31 @@ pub enum NodeKind {
     Flow,
 }
 
+impl NodeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Module => "module",
+            Self::Class => "class",
+            Self::Function => "function",
+            Self::Method => "method",
+            Self::Trait => "trait",
+            Self::Impl => "impl",
+            Self::Variable => "variable",
+            Self::Type => "type",
+            Self::Document => "document",
+            Self::Section => "section",
+            Self::Concept => "concept",
+            Self::Diagram => "diagram",
+            Self::Image => "image",
+            Self::Commit => "commit",
+            Self::Author => "author",
+            Self::Hyperedge => "hyperedge",
+            Self::Flow => "flow",
+        }
+    }
+}
+
 /// A property-bag node in the graph.
 ///
 /// `qualified_name` is the canonical key used for symbol resolution and

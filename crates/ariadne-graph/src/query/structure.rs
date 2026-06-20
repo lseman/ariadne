@@ -25,6 +25,24 @@ pub struct BridgeScore {
     pub articulation: bool,
 }
 
+/// A hub node — highest total degree (in + out), excluding File nodes.
+///
+/// Hub nodes are architectural hotspots: changes to them have
+/// disproportionate blast radius. Different from bridge nodes which
+/// use betweenness centrality.
+#[derive(Debug, Clone)]
+pub struct HubNode {
+    pub node: NodeId,
+    pub name: String,
+    pub qualified_name: String,
+    pub kind: String,
+    pub file: String,
+    pub in_degree: usize,
+    pub out_degree: usize,
+    pub total_degree: usize,
+    pub community_id: Option<usize>,
+}
+
 pub fn strongly_connected_components(graph: &Graph) -> Vec<Component> {
     let mut state = TarjanState::default();
     for (node, _) in graph.nodes() {
@@ -131,6 +149,49 @@ pub fn approx_betweenness(graph: &Graph, max_sources: usize) -> HashMap<NodeId, 
         }
     }
     scores
+}
+
+/// Find the most connected nodes (highest in+out degree), excluding File nodes.
+///
+/// Hub nodes are architectural hotspots -- changes to them have
+/// disproportionate blast radius. Different from bridge nodes which
+/// use betweenness centrality.
+pub fn hub_nodes(graph: &Graph, top_n: usize) -> Vec<HubNode> {
+    // Build degree counts from all edges
+    let mut in_degree: HashMap<NodeId, usize> = HashMap::new();
+    let mut out_degree: HashMap<NodeId, usize> = HashMap::new();
+    for (_, src, dst, _) in graph.edges() {
+        *out_degree.entry(src).or_default() += 1;
+        *in_degree.entry(dst).or_default() += 1;
+    }
+
+    let mut scored: Vec<_> = graph
+        .nodes()
+        .filter(|(_, n)| n.kind != crate::core::NodeKind::File)
+        .map(|(id, n)| {
+            let ind = in_degree.get(&id).copied().unwrap_or(0);
+            let outd = out_degree.get(&id).copied().unwrap_or(0);
+            let total = ind + outd;
+            if total == 0 {
+                return None;
+            }
+            Some(HubNode {
+                node: id,
+                name: n.name.clone(),
+                qualified_name: n.qualified_name.clone(),
+                kind: n.kind.as_str().to_string(),
+                file: n.source_uri.clone().unwrap_or_default(),
+                in_degree: ind,
+                out_degree: outd,
+                total_degree: total,
+                community_id: None,
+            })
+        })
+        .filter_map(|x| x)
+        .collect();
+    scored.sort_by_key(|h| std::cmp::Reverse(h.total_degree));
+    scored.truncate(top_n);
+    scored
 }
 
 pub fn bridge_scores(

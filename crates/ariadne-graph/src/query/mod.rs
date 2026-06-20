@@ -18,6 +18,7 @@ pub mod communities;
 pub mod counterfactual;
 pub mod dedup;
 pub mod differential;
+pub mod export;
 pub mod impact;
 pub mod motifs;
 pub mod paths;
@@ -26,8 +27,8 @@ pub mod structure;
 
 pub use centrality::{is_rank_noise, pagerank, personalized_pagerank};
 pub use communities::{
-    community_cohesion, community_quality, infomap, infomap_with_options, leiden,
-    leiden_with_options, louvain, louvain_with_options, CommunityObjective, CommunityOptions,
+    community_cohesion, community_quality, infomap, infomap_with_options, knowledge_gaps,
+    leiden, leiden_with_options, louvain, louvain_with_options, CommunityObjective, CommunityOptions,
     CommunityQuality, LOW_COHESION_THRESHOLD,
 };
 pub use dedup::{deduplicate_nodes, DedupOptions, DedupResult};
@@ -39,6 +40,6 @@ pub use paths::{callees_of, callers_of, find_paths, find_top_paths, PathQuery, W
 pub use search::{fts_ranked_search, ranked_search, search_by_name, SearchHit};
 pub use structure::{
     approx_betweenness, articulation_points, bridge_scores, call_resolution_stats, core_numbers,
-    cyclic_components, strongly_connected_components, BridgeScore, CallResolution, Component,
-    CoreNumber,
+    cyclic_components, hub_nodes, strongly_connected_components, BridgeScore, CallResolution,
+    Component, CoreNumber, HubNode,
 };

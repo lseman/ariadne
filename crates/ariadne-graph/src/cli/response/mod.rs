@@ -219,6 +219,49 @@ fn _tool_response(
                 detail,
             )
         }
+        "hub_nodes" => {
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
+            let hubs = ariadne_graph::query::hub_nodes(&graph, limit);
+            let rows: Vec<_> = hubs
+                .into_iter()
+                .map(|h| {
+                    json!({
+                        "id": h.node.0,
+                        "qualified_name": h.qualified_name,
+                        "name": h.name,
+                        "kind": h.kind,
+                        "file": h.file,
+                        "in_degree": h.in_degree,
+                        "out_degree": h.out_degree,
+                        "total_degree": h.total_degree,
+                        "community_id": h.community_id,
+                    })
+                })
+                .collect();
+            compact_for_detail(json!({ "operation": "hub_nodes", "hits": rows }), detail)
+        }
+        "knowledge_gaps" => {
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
+            let result = ariadne_graph::query::knowledge_gaps(&graph);
+            // Truncate each category to limit
+            let mut out = result.as_object().cloned().unwrap_or_default();
+            for key in ["isolated_nodes", "untested_hotspots", "single_file_communities"] {
+                if let Some(arr) = out.get_mut(key).and_then(Value::as_array_mut) {
+                    arr.truncate(limit);
+                }
+            }
+            compact_for_detail(Value::Object(out), detail)
+        }
+        "export_graphml" => {
+            let output = required_str(params, "output")?;
+            let communities = ariadne_graph::query::leiden(&graph);
+            let xml = ariadne_graph::query::export::export_graphml(&graph, &communities);
+            std::fs::write(output, &xml)?;
+            compact_for_detail(
+                json!({ "operation": "export_graphml", "output": output, "format": "graphml", "written": true, "size": xml.len() }),
+                detail,
+            )
+        }
         other => bail!("unknown tool operation {}", other),
     };
     let response = apply_response_guardrails(response, &graph, params, detail);

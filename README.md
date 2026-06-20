@@ -82,6 +82,9 @@ Ariadne is already useful as a local codebase map, an agent context server, and 
 | D3 graph explorer | working |
 | Performance guardrails | working — response budgets, pagination, graph summaries |
 | Motifs / counterfactuals | working — VF2 subgraph isomorphism |
+| Knowledge gaps | working — isolated nodes, untested hotspots, thin communities, single-file communities |
+| Hub detection | working — highest-degree nodes (complements bridge nodes) |
+| GraphML export | working — Gephi, yEd, Cytoscape compatible |
 | Dedup | working — normalization → entropy → MinHash/LSH → Jaro-Winkler |
 | Custom language support | working — TOML config for adding languages via `.ariadne/languages.toml` |
 | Hints system | working — session-tracked next-step suggestions after tool calls |
@@ -291,6 +294,9 @@ Supported operations:
 | `graph_diff` | | `base`, `head`, `limit` | Temporal diff between graph states |
 | `counterfactual` | | `target`, `direction`, `max_depth` | Drops edges from a symbol, reruns BFS, reports reachable nodes lost |
 | `motifs` | | `built_in`, `limit` | VF2 subgraph pattern matching — built-in: `security_audit`, `diamond`, `doc_triangle` |
+| `hub_nodes` | | `limit` | Highest-degree nodes (different from bridge nodes which use betweenness centrality) |
+| `knowledge_gaps` | | `limit` | Structural weaknesses: isolated nodes, untested hotspots, thin communities, single-file communities |
+| `export_graphml` | | `output` | Export graph as GraphML XML (for Gephi, yEd, Cytoscape) |
 
 ## MCP Server
 
