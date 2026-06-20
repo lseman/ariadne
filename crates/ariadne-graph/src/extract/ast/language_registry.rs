@@ -1,15 +1,28 @@
-//! Central language registry — built-in languages + TOML config + custom.
+//! Central language registry — bundled defaults + user TOML overlay.
 //!
-//! Each language definition provides tree-sitter node type sets and optional
-//! query templates. The registry merges built-in defaults with `.ariadne/
-//! languages.toml` overrides and custom language entries.
+//! Built-in language definitions live in `languages.toml` (embedded in the
+//! binary via `include_str!`).  On first access the registry loads the
+//! bundled defaults, then merges any user overlay found at
+//! `.ariadne/languages.toml` relative to the current working directory.
+//!
+//! The TOML schema:
+//! ```toml
+//! [languages.rust]
+//! grammar = "rust"
+//! extensions = [".rs"]
+//! function_node_types = ["function_item", "closure_expression"]
+//! class_node_types = ["struct_item", "enum_item"]
+//! import_node_types = ["use_declaration"]
+//! call_node_types = ["call_expression"]
+//! comment = "Rust"
+//! ```
 
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
-// Config schema (same as custom_lang.rs)
+// Config schema
 // ---------------------------------------------------------------------------
 
 const CONFIG_RELATIVE_PATH: &str = ".ariadne/languages.toml";
@@ -53,6 +66,7 @@ pub struct LanguageDef {
 }
 
 impl LanguageDef {
+    /// Return true when `path` has an extension listed in this language.
     pub fn matches_ext(&self, path: &std::path::Path) -> bool {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             let ext = ext.to_lowercase();
@@ -67,166 +81,40 @@ impl LanguageDef {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in language definitions (extracted from existing extractors)
+// Built-in defaults — loaded from bundled TOML
 // ---------------------------------------------------------------------------
 
-const BUILT_IN_NAMES: &[&str] = &[
+/// The bundled `languages.toml` file that ships with the crate.
+const BUNDLED_LANGUAGES_TOML: &str = include_str!("languages.toml");
+
+/// Parse the bundled TOML into a HashMap of LanguageDef.
+fn load_builtins() -> HashMap<String, LanguageDef> {
+    let config: Config = toml::from_str(BUNDLED_LANGUAGES_TOML).unwrap_or_else(|err| {
+        panic!("bundled languages.toml is invalid TOML: {err}");
+    });
+    config
+        .languages
+        .into_iter()
+        .map(|(name, entry)| {
+            let def = LanguageDef {
+                name: name.clone(),
+                grammar: entry.grammar.unwrap_or_else(|| name.clone()),
+                extensions: entry.extensions.unwrap_or_default(),
+                function_node_types: entry.function_node_types,
+                class_node_types: entry.class_node_types,
+                import_node_types: entry.import_node_types,
+                call_node_types: entry.call_node_types,
+                comment: entry.comment,
+            };
+            (name.to_lowercase(), def)
+        })
+        .collect()
+}
+
+/// Names of languages that come from the bundled defaults.
+const BUILTIN_NAMES: &[&str] = &[
     "rust", "python", "cpp", "typescript", "tsx", "javascript",
 ];
-
-fn default_rust() -> LanguageDef {
-    LanguageDef {
-        name: "rust".into(),
-        grammar: "rust".into(),
-        extensions: vec![".rs".into()],
-        function_node_types: vec![
-            "function_item".into(),
-            "function_type".into(),
-            "closure_expression".into(),
-        ],
-        class_node_types: vec![
-            "struct_item".into(),
-            "enum_item".into(),
-            "union_item".into(),
-            "trait_item".into(),
-            "impl_block".into(),
-        ],
-        import_node_types: vec!["use_declaration".into()],
-        call_node_types: vec!["call_expression".into()],
-        comment: "Rust".into(),
-    }
-}
-
-fn default_python() -> LanguageDef {
-    LanguageDef {
-        name: "python".into(),
-        grammar: "python".into(),
-        extensions: vec![".py".into()],
-        function_node_types: vec![
-            "function_definition".into(),
-            "async_function_definition".into(),
-        ],
-        class_node_types: vec!["class_definition".into()],
-        import_node_types: vec![
-            "import_statement".into(),
-            "import_from_statement".into(),
-        ],
-        call_node_types: vec!["call".into()],
-        comment: "Python".into(),
-    }
-}
-
-fn default_cpp() -> LanguageDef {
-    LanguageDef {
-        name: "cpp".into(),
-        grammar: "cpp".into(),
-        extensions: vec![
-            ".c".into(), ".cc".into(), ".cpp".into(), ".cxx".into(),
-            ".h".into(), ".hh".into(), ".hpp".into(), ".hxx".into(),
-        ],
-        function_node_types: vec![
-            "function_definition".into(),
-            "destructor".into(),
-        ],
-        class_node_types: vec![
-            "class_specifier".into(),
-            "struct_specifier".into(),
-            "enum_specifier".into(),
-            "enum_declaration".into(),
-        ],
-        import_node_types: vec!["preproc_include".into()],
-        call_node_types: vec!["call_expression".into()],
-        comment: "C/C++".into(),
-    }
-}
-
-fn default_typescript() -> LanguageDef {
-    LanguageDef {
-        name: "typescript".into(),
-        grammar: "typescript".into(),
-        extensions: vec![".ts".into(), ".tsx".into()],
-        function_node_types: vec![
-            "function_declaration".into(),
-            "function".into(),
-            "arrow_function".into(),
-            "method_definition".into(),
-            "generator_function_declaration".into(),
-            "generator_function".into(),
-        ],
-        class_node_types: vec![
-            "class_declaration".into(),
-            "class".into(),
-            "interface_declaration".into(),
-            "type_alias_declaration".into(),
-            "enum_declaration".into(),
-            "enum".into(),
-        ],
-        import_node_types: vec![
-            "import_statement".into(),
-            "export_specifier".into(),
-            "import_clause".into(),
-        ],
-        call_node_types: vec!["call_expression".into(), "new_expression".into()],
-        comment: "TypeScript/TSX".into(),
-    }
-}
-
-fn default_tsx() -> LanguageDef {
-    LanguageDef {
-        name: "tsx".into(),
-        grammar: "tsx".into(),
-        extensions: vec![".tsx".into(), ".jsx".into()],
-        function_node_types: vec![
-            "function_declaration".into(),
-            "function".into(),
-            "arrow_function".into(),
-            "method_definition".into(),
-            "jsx_element".into(),
-        ],
-        class_node_types: vec![
-            "class_declaration".into(),
-            "class".into(),
-            "interface_declaration".into(),
-            "type_alias_declaration".into(),
-            "enum_declaration".into(),
-            "enum".into(),
-        ],
-        import_node_types: vec![
-            "import_statement".into(),
-            "export_specifier".into(),
-            "import_clause".into(),
-        ],
-        call_node_types: vec!["call_expression".into(), "new_expression".into()],
-        comment: "TSX/JSX".into(),
-    }
-}
-
-fn default_javascript() -> LanguageDef {
-    LanguageDef {
-        name: "javascript".into(),
-        grammar: "javascript".into(),
-        extensions: vec![".js".into(), ".mjs".into(), ".cjs".into()],
-        function_node_types: vec![
-            "function_declaration".into(),
-            "function".into(),
-            "arrow_function".into(),
-            "method_definition".into(),
-            "generator_function_declaration".into(),
-            "generator_function".into(),
-        ],
-        class_node_types: vec![
-            "class_declaration".into(),
-            "class".into(),
-        ],
-        import_node_types: vec![
-            "import_statement".into(),
-            "export_specifier".into(),
-            "import_clause".into(),
-        ],
-        call_node_types: vec!["call_expression".into(), "new_expression".into()],
-        comment: "JavaScript".into(),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -249,19 +137,11 @@ impl LanguageRegistry {
         REGISTRY.get_or_init(LanguageRegistry::load)
     }
 
-    /// Load registry from built-ins + TOML config.
+    /// Load registry from bundled defaults + user overlay.
     pub fn load() -> Self {
-        let mut all: HashMap<String, LanguageDef> = HashMap::new();
+        let mut all = load_builtins();
 
-        // Register built-in languages
-        all.insert("rust".into(), default_rust());
-        all.insert("python".into(), default_python());
-        all.insert("cpp".into(), default_cpp());
-        all.insert("typescript".into(), default_typescript());
-        all.insert("tsx".into(), default_tsx());
-        all.insert("javascript".into(), default_javascript());
-
-        // Load and merge TOML config
+        // Load and merge user TOML config
         let repo_root = std::env::current_dir().unwrap_or_else(|_| {
             let p = Path::new(".");
             p.to_path_buf()
@@ -271,7 +151,6 @@ impl LanguageRegistry {
         if config_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&config_path) {
                 if let Ok(config) = toml::from_str::<Config>(&content) {
-                    let _count = config.languages.len().min(MAX_CUSTOM_LANGUAGES);
                     if config.languages.len() > MAX_CUSTOM_LANGUAGES {
                         tracing::warn!(
                             "config has {} entries, using top {}",
@@ -279,7 +158,11 @@ impl LanguageRegistry {
                             MAX_CUSTOM_LANGUAGES,
                         );
                     }
-                    for (name, entry) in config.languages.into_iter().take(MAX_CUSTOM_LANGUAGES) {
+                    for (name, entry) in config
+                        .languages
+                        .into_iter()
+                        .take(MAX_CUSTOM_LANGUAGES)
+                    {
                         Self::merge_entry(&mut all, &name, entry);
                     }
                 } else {
@@ -295,7 +178,7 @@ impl LanguageRegistry {
         let name_lower = name.to_lowercase();
 
         // Built-in names cannot be overridden (but can merge node types)
-        let is_builtin = BUILT_IN_NAMES.contains(&name_lower.as_str());
+        let is_builtin = BUILTIN_NAMES.contains(&name_lower.as_str());
 
         if is_builtin {
             // Merge node types into existing built-in
@@ -354,7 +237,8 @@ impl LanguageRegistry {
 
     /// Look up a language by name.
     pub fn get(&self, name: &str) -> Option<&LanguageDef> {
-        self.languages.get(name)
+        self.languages
+            .get(name)
             .or_else(|| self.languages.get(&name.to_lowercase()))
     }
 
@@ -389,8 +273,51 @@ pub fn get_language_by_path(path: &Path) -> Option<&'static LanguageDef> {
     registry().get_by_path(path)
 }
 
-/// Clear the registry cache (for testing).
-pub fn clear_cache() {
-    // Note: OnceLock doesn't support reset. For testing, use a different
-    // approach or just let it stay loaded.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_toml_parses_cleanly() {
+        // Verify the bundled TOML is valid and contains expected languages.
+        let defs = load_builtins();
+        assert!(defs.contains_key("rust"));
+        assert!(defs.contains_key("python"));
+        assert!(defs.contains_key("cpp"));
+        assert!(defs.contains_key("typescript"));
+        assert!(defs.contains_key("tsx"));
+        assert!(defs.contains_key("javascript"));
+
+        // Rust must have extensions and node types.
+        let rust = defs.get("rust").unwrap();
+        assert_eq!(rust.extensions, vec![".rs"]);
+        assert!(rust.function_node_types.contains(&"function_item".to_string()));
+        assert!(rust.class_node_types.contains(&"struct_item".to_string()));
+    }
+
+    #[test]
+    fn matches_ext_case_insensitive() {
+        let defs = load_builtins();
+        let rust = defs.get("rust").unwrap();
+        assert!(rust.matches_ext(Path::new("src/lib.RS")));
+        assert!(rust.matches_ext(Path::new("src/lib.rs")));
+        assert!(!rust.matches_ext(Path::new("src/main.py")));
+    }
+
+    #[test]
+    fn tsx_matches_jsx() {
+        let defs = load_builtins();
+        let tsx = defs.get("tsx").unwrap();
+        assert!(tsx.matches_ext(Path::new("App.tsx")));
+        assert!(tsx.matches_ext(Path::new("View.jsx")));
+    }
+
+    #[test]
+    fn cpp_matches_all_cxx_extensions() {
+        let defs = load_builtins();
+        let cpp = defs.get("cpp").unwrap();
+        for ext in &[".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"] {
+            assert!(cpp.matches_ext(Path::new(&format!("f{ext}"))), "missing {}", ext);
+        }
+    }
 }

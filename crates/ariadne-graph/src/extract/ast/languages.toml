@@ -1,0 +1,160 @@
+# Built-in language definitions.
+#
+# This file is the single source of truth for all language metadata
+# (extensions, node types, grammar names).  The registry loads it at
+# startup and merges it with any user overlay at `.ariadne/languages.toml`.
+#
+# Users who want to add a new language or tweak an existing one should
+# create `.ariadne/languages.toml` — the overlay is merged on top of
+# these defaults.
+
+[languages.rust]
+grammar = "rust"
+extensions = [".rs"]
+function_node_types = [
+    "function_item",
+    "function_type",
+    "closure_expression",
+]
+class_node_types = [
+    "struct_item",
+    "enum_item",
+    "union_item",
+    "trait_item",
+    "impl_block",
+]
+import_node_types = [
+    "use_declaration",
+]
+call_node_types = [
+    "call_expression",
+]
+comment = "Rust"
+
+[languages.python]
+grammar = "python"
+extensions = [".py"]
+function_node_types = [
+    "function_definition",
+    "async_function_definition",
+]
+class_node_types = [
+    "class_definition",
+]
+import_node_types = [
+    "import_statement",
+    "import_from_statement",
+]
+call_node_types = [
+    "call",
+]
+comment = "Python"
+
+[languages.cpp]
+grammar = "cpp"
+extensions = [
+    ".c", ".cc", ".cpp", ".cxx",
+    ".h", ".hh", ".hpp", ".hxx",
+]
+function_node_types = [
+    "function_definition",
+    "destructor",
+]
+class_node_types = [
+    "class_specifier",
+    "struct_specifier",
+    "enum_specifier",
+    "enum_declaration",
+]
+import_node_types = [
+    "preproc_include",
+]
+call_node_types = [
+    "call_expression",
+]
+comment = "C/C++"
+
+[languages.typescript]
+grammar = "typescript"
+extensions = [".ts"]
+function_node_types = [
+    "function_declaration",
+    "function",
+    "arrow_function",
+    "method_definition",
+    "generator_function_declaration",
+    "generator_function",
+]
+class_node_types = [
+    "class_declaration",
+    "class",
+    "interface_declaration",
+    "type_alias_declaration",
+    "enum_declaration",
+    "enum",
+]
+import_node_types = [
+    "import_statement",
+    "export_specifier",
+    "import_clause",
+]
+call_node_types = [
+    "call_expression",
+    "new_expression",
+]
+comment = "TypeScript"
+
+[languages.tsx]
+grammar = "tsx"
+extensions = [".tsx", ".jsx"]
+function_node_types = [
+    "function_declaration",
+    "function",
+    "arrow_function",
+    "method_definition",
+    "jsx_element",
+]
+class_node_types = [
+    "class_declaration",
+    "class",
+    "interface_declaration",
+    "type_alias_declaration",
+    "enum_declaration",
+    "enum",
+]
+import_node_types = [
+    "import_statement",
+    "export_specifier",
+    "import_clause",
+]
+call_node_types = [
+    "call_expression",
+    "new_expression",
+]
+comment = "TSX/JSX"
+
+[languages.javascript]
+grammar = "javascript"
+extensions = [".js", ".mjs", ".cjs"]
+function_node_types = [
+    "function_declaration",
+    "function",
+    "arrow_function",
+    "method_definition",
+    "generator_function_declaration",
+    "generator_function",
+]
+class_node_types = [
+    "class_declaration",
+    "class",
+]
+import_node_types = [
+    "import_statement",
+    "export_specifier",
+    "import_clause",
+]
+call_node_types = [
+    "call_expression",
+    "new_expression",
+]
+comment = "JavaScript"
