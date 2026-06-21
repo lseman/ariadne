@@ -248,6 +248,51 @@ impl Graph {
     pub fn inner(&self) -> &StableDiGraph<Node, Edge> {
         &self.inner
     }
+
+    /// Merge all nodes and edges from `other` into `self`.
+    ///
+    /// Nodes with matching qualified names are deduplicated (same behaviour
+    /// as `add_node`). Edges are added with their original source/target
+    /// semantics — duplicate edges (same src, dst, kind) are skipped.
+    pub fn merge(&mut self, other: Graph) {
+        let own_qn: HashMap<String, NodeIndex> = self
+            .inner
+            .node_indices()
+            .map(|i| (self.inner[i].qualified_name.clone(), i))
+            .collect();
+
+        // Build a mapping from each node's original index in `other`
+        // to its new index in the merged graph.
+        let mut remap: HashMap<usize, NodeIndex> = HashMap::new();
+        for (idx, (_, node)) in other.inner.node_indices().zip(other.nodes()) {
+            let qn = node.qualified_name.clone();
+            let mapped = match own_qn.get(&qn) {
+                Some(idx) => *idx,
+                None => {
+                    let idx = self.inner.add_node(node.clone());
+                    self.by_qname.insert(qn, idx);
+                    idx
+                }
+            };
+            remap.insert(idx.index(), mapped);
+        }
+
+        for (_, src, dst, edge) in other.edges() {
+            let Some(si) = remap.get(&(src.0 as usize)).copied() else {
+                continue;
+            };
+            let Some(di) = remap.get(&(dst.0 as usize)).copied() else {
+                continue;
+            };
+            if si == di {
+                continue;
+            }
+            if self.has_edge_kind(si, di, edge) {
+                continue;
+            }
+            self.inner.add_edge(si, di, edge.clone());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -324,5 +369,55 @@ mod tests {
         assert_eq!(g.edge_count(), 0);
         assert_eq!(g.find_by_qname("m::f"), Some(a));
         assert_eq!(g.find_by_qname("m::g"), Some(b));
+    }
+
+    #[test]
+    fn merge_combines_nodes_and_edges() {
+        let mut g1 = Graph::new();
+        let a = g1.add_node(Node::new(NodeKind::Function, "m::f"));
+        let b = g1.add_node(Node::new(NodeKind::Function, "m::g"));
+        g1.add_edge(a, b, Edge::extracted(EdgeKind::Calls));
+
+        let mut g2 = Graph::new();
+        let c = g2.add_node(Node::new(NodeKind::Function, "n::h"));
+        let d = g2.add_node(Node::new(NodeKind::Function, "n::i"));
+        g2.add_edge(c, d, Edge::extracted(EdgeKind::Calls));
+
+        g1.merge(g2);
+        assert_eq!(g1.node_count(), 4);
+        assert_eq!(g1.edge_count(), 2);
+        assert!(g1.find_by_qname("m::f").is_some());
+        assert!(g1.find_by_qname("n::h").is_some());
+    }
+
+    #[test]
+    fn merge_deduplicates_nodes_by_qname() {
+        let mut g1 = Graph::new();
+        let a = g1.add_node(Node::new(NodeKind::Function, "m::f"));
+        g1.add_node(Node::new(NodeKind::File, "file::a.rs"));
+
+        let mut g2 = Graph::new();
+        let _ = g2.add_node(Node::new(NodeKind::Function, "m::f")); // same qname
+        g2.add_node(Node::new(NodeKind::File, "file::b.rs"));
+
+        g1.merge(g2);
+        assert_eq!(g1.node_count(), 3, "duplicate m::f should be deduped");
+        assert_eq!(g1.find_by_qname("m::f"), Some(a));
+    }
+
+    #[test]
+    fn merge_deduplicates_edges() {
+        let mut g1 = Graph::new();
+        let a = g1.add_node(Node::new(NodeKind::Function, "a"));
+        let b = g1.add_node(Node::new(NodeKind::Function, "b"));
+        g1.add_edge(a, b, Edge::extracted(EdgeKind::Calls));
+
+        let mut g2 = Graph::new();
+        let a2 = g2.add_node(Node::new(NodeKind::Function, "a"));
+        let b2 = g2.add_node(Node::new(NodeKind::Function, "b"));
+        g2.add_edge(a2, b2, Edge::extracted(EdgeKind::Calls));
+
+        g1.merge(g2);
+        assert_eq!(g1.edge_count(), 1, "duplicate edge should be skipped");
     }
 }

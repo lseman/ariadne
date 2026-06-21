@@ -1,5 +1,6 @@
 use crate::core::{Edge, EdgeKind, Graph, NodeKind};
 use anyhow::Result;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use walkdir::WalkDir;
@@ -32,38 +33,48 @@ impl IgnoreSet {
 
 /// Walk `root` and dispatch each supported file to the right pass.
 ///
+/// Files are processed in parallel using rayon. Each file is extracted
+/// into its own graph, then all graphs are merged. Post-processing
+/// (placeholder resolution, concept mentions, flows) runs once on the
+/// merged graph.
+///
 /// Returns the number of files processed. Skips hidden directories
 /// (`.git`, `.venv`, `target`, `node_modules`).
 pub fn extract_directory(root: &Path, graph: &mut Graph) -> Result<usize> {
-    let mut count = 0usize;
     let ignore = IgnoreSet::load(root);
     let registry = super::ast::language_registry::registry();
-    for entry in WalkDir::new(root)
+
+    // Collect all file paths first (sequential walk, fast).
+    let files: Vec<_> = WalkDir::new(root)
         .into_iter()
         .filter_entry(|e| !ignore.is_ignored(e.path()))
         .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if let Some(lang_def) = registry.get_by_path(path) {
-            if let Err(e) = super::ast::custom_lang::extract_file(path, graph, lang_def) {
-                tracing::warn!("failed to extract {}: {}", path.display(), e);
-            } else {
-                count += 1;
-                continue;
+        .filter(|e| e.path().is_file())
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    let count = files.len();
+
+    // Extract each file in parallel, each into its own Graph.
+    let per_file: Vec<_> = files
+        .par_iter()
+        .map(|path| {
+            let mut g = Graph::new();
+            if let Some(lang_def) = registry.get_by_path(path) {
+                let _ = super::ast::custom_lang::extract_file(path, &mut g, lang_def);
+            } else if let Some(extractor) = super::concept::concept_registry::get_by_path(path) {
+                let _ = extractor(path, &mut g);
             }
-        }
-        // Concept (prose/diagram) extractor as fallback.
-        if let Some(extractor) = super::concept::concept_registry::get_by_path(path) {
-            if let Err(e) = extractor(path, graph) {
-                tracing::warn!("failed to extract {}: {}", path.display(), e);
-            } else {
-                count += 1;
-            }
-        }
+            g
+        })
+        .collect();
+
+    // Merge all per-file graphs into the target graph.
+    for g in per_file {
+        graph.merge(g);
     }
+
+    // Post-processing on the merged graph.
     resolve_call_placeholders(graph);
     super::concept::resolve_all_mentions(graph);
     derive_tested_by_edges(graph);
@@ -80,40 +91,40 @@ pub fn extract_directory_with_custom(
     graph: &mut Graph,
     custom: &std::collections::HashMap<String, super::ast::language_registry::LanguageDef>,
 ) -> Result<usize> {
-    let mut count = 0usize;
     let ignore = IgnoreSet::load(root);
     let registry = super::ast::language_registry::registry();
-    for entry in WalkDir::new(root)
+
+    let files: Vec<_> = WalkDir::new(root)
         .into_iter()
         .filter_entry(|e| !ignore.is_ignored(e.path()))
         .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        // Check custom languages first (they override built-in extension matching)
-        let lang_def = custom
-            .values()
-            .find(|l| l.matches_ext(path))
-            .or_else(|| registry.get_by_path(path));
-        if let Some(lang_def) = lang_def {
-            if let Err(e) = super::ast::custom_lang::extract_file(path, graph, lang_def) {
-                tracing::warn!("failed to extract {}: {}", path.display(), e);
-            } else {
-                count += 1;
-                continue;
+        .filter(|e| e.path().is_file())
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    let count = files.len();
+
+    let per_file: Vec<_> = files
+        .par_iter()
+        .map(|path| {
+            let mut g = Graph::new();
+            let lang_def = custom
+                .values()
+                .find(|l| l.matches_ext(path))
+                .or_else(|| registry.get_by_path(path));
+            if let Some(lang_def) = lang_def {
+                let _ = super::ast::custom_lang::extract_file(path, &mut g, lang_def);
+            } else if let Some(extractor) = super::concept::concept_registry::get_by_path(path) {
+                let _ = extractor(path, &mut g);
             }
-        }
-        // Concept (prose/diagram) extractor as fallback.
-        if let Some(extractor) = super::concept::concept_registry::get_by_path(path) {
-            if let Err(e) = extractor(path, graph) {
-                tracing::warn!("failed to extract {}: {}", path.display(), e);
-            } else {
-                count += 1;
-            }
-        }
+            g
+        })
+        .collect();
+
+    for g in per_file {
+        graph.merge(g);
     }
+
     resolve_call_placeholders(graph);
     super::concept::resolve_all_mentions(graph);
     derive_tested_by_edges(graph);
