@@ -24,6 +24,7 @@ pub mod vision;
 pub mod walker;
 
 pub use concept::markdown::resolve_mentions;
+pub use concept::resolve_all_mentions;
 pub use flows::{
     affected_flows, all_flows, compute_flows, compute_flows_with_options, flows_through,
     FlowOptions,

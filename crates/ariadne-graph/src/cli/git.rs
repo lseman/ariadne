@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Collect file hashes for a directory.
+///
+/// Only hashes files that the language registry can extract, so the
+/// hash set matches exactly what `extract_directory` produces.
+/// This prevents stale hashes for concept files (`.md`, `.html`, …)
+/// that `is_supported` would match but the registry does not.
 pub fn collect_file_hashes(root: &Path) -> Result<Vec<(String, String)>> {
     let mut hashes = Vec::new();
     let ignore = ariadne_graph::extract::ignore_set(root);
@@ -16,7 +21,7 @@ pub fn collect_file_hashes(root: &Path) -> Result<Vec<(String, String)>> {
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        if path.is_file() && ariadne_graph::extract::is_supported(path) {
+        if path.is_file() && ariadne_graph::extract::get_language_by_path(path).is_some() {
             hashes.push((path.to_string_lossy().to_string(), hash_file(path)?));
         }
     }

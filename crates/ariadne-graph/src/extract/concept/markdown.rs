@@ -443,6 +443,13 @@ pub fn resolve_mentions(graph: &mut Graph) -> usize {
     added
 }
 
+/// Resolve mentions across all concept extractors.
+///
+/// Delegates to the markdown resolver (which HTML also uses). Idempotent.
+pub fn resolve_all_mentions(graph: &mut Graph) -> usize {
+    resolve_mentions(graph)
+}
+
 /// Resolve a symbol name to a graph node.
 fn resolve_symbol(graph: &Graph, token: &str) -> Option<NodeId> {
     if token.len() < 2 {

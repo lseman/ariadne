@@ -52,11 +52,20 @@ pub fn extract_directory(root: &Path, graph: &mut Graph) -> Result<usize> {
                 tracing::warn!("failed to extract {}: {}", path.display(), e);
             } else {
                 count += 1;
+                continue;
+            }
+        }
+        // Concept (prose/diagram) extractor as fallback.
+        if let Some(extractor) = super::concept::concept_registry::get_by_path(path) {
+            if let Err(e) = extractor(path, graph) {
+                tracing::warn!("failed to extract {}: {}", path.display(), e);
+            } else {
+                count += 1;
             }
         }
     }
     resolve_call_placeholders(graph);
-    super::concept::markdown::resolve_mentions(graph);
+    super::concept::resolve_all_mentions(graph);
     derive_tested_by_edges(graph);
     super::flows::compute_flows(graph);
     Ok(count)
@@ -93,11 +102,20 @@ pub fn extract_directory_with_custom(
                 tracing::warn!("failed to extract {}: {}", path.display(), e);
             } else {
                 count += 1;
+                continue;
+            }
+        }
+        // Concept (prose/diagram) extractor as fallback.
+        if let Some(extractor) = super::concept::concept_registry::get_by_path(path) {
+            if let Err(e) = extractor(path, graph) {
+                tracing::warn!("failed to extract {}: {}", path.display(), e);
+            } else {
+                count += 1;
             }
         }
     }
     resolve_call_placeholders(graph);
-    super::concept::markdown::resolve_mentions(graph);
+    super::concept::resolve_all_mentions(graph);
     derive_tested_by_edges(graph);
     super::flows::compute_flows(graph);
     Ok(count)
@@ -112,10 +130,13 @@ pub fn ignore_set(root: &Path) -> IgnoreSet {
 pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
     let registry = super::ast::language_registry::registry();
     if let Some(lang_def) = registry.get_by_path(path) {
-        super::ast::custom_lang::extract_file(path, graph, lang_def)
-    } else {
-        Ok(())
+        return super::ast::custom_lang::extract_file(path, graph, lang_def);
     }
+    // Concept (prose/diagram) extractor as fallback.
+    if let Some(extractor) = super::concept::concept_registry::get_by_path(path) {
+        return extractor(path, graph);
+    }
+    Ok(())
 }
 
 /// Extract a single file with optional custom language support.
@@ -126,20 +147,24 @@ pub fn extract_file_with_custom(
 ) -> Result<()> {
     // Check custom languages first (they override built-in)
     if let Some(lang_def) = custom.values().find(|l| l.matches_ext(path)) {
-        super::ast::custom_lang::extract_file(path, graph, lang_def)
-    } else {
-        let registry = super::ast::language_registry::registry();
-        if let Some(lang_def) = registry.get_by_path(path) {
-            super::ast::custom_lang::extract_file(path, graph, lang_def)
-        } else {
-            Ok(())
-        }
+        return super::ast::custom_lang::extract_file(path, graph, lang_def);
     }
+    let registry = super::ast::language_registry::registry();
+    if let Some(lang_def) = registry.get_by_path(path) {
+        return super::ast::custom_lang::extract_file(path, graph, lang_def);
+    }
+    // Concept (prose/diagram) extractor as fallback.
+    if let Some(extractor) = super::concept::concept_registry::get_by_path(path) {
+        return extractor(path, graph);
+    }
+    Ok(())
 }
 
 /// Built-in file extensions that are always supported, regardless of
-/// TOML config. Document languages (markdown, HTML, SVG, LaTeX) live
-/// outside the AST pass and use their own extractors.
+/// TOML config. Document languages (markdown, HTML, LaTeX) live
+/// outside the AST pass and use concept extractors. SVG uses the
+/// vision (diagram) extractor. All are listed here for relevance
+/// filtering.
 pub fn is_supported(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|s| s.to_str()),
