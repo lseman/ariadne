@@ -15,11 +15,7 @@ use std::io::Write;
 /// `confidence`, and `score` attributes.
 pub fn export_graphml(graph: &Graph, community_map: &HashMap<NodeId, usize>) -> String {
     let mut out = Vec::new();
-    writeln!(
-        out,
-        r#"<?xml version="1.0" encoding="UTF-8"?>"#
-    )
-    .unwrap();
+    writeln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#).unwrap();
     writeln!(
         out,
         r#"<graphml xmlns="http://graphml.graphstruct.org/graphml"
@@ -62,7 +58,7 @@ pub fn export_graphml(graph: &Graph, community_map: &HashMap<NodeId, usize>) -> 
         let qn = html_escape(&node.qualified_name);
         let name = html_escape(&node.name);
         let kind = html_escape(node.kind.as_str());
-        let file = html_escape(&node.source_uri.as_deref().unwrap_or(""));
+        let file = html_escape(node.source_uri.as_deref().unwrap_or(""));
         let comm_id = community_map.get(&id).copied();
 
         writeln!(out, r#"    <node id="n{idx}">"#, idx = id.0).unwrap();
@@ -70,7 +66,12 @@ pub fn export_graphml(graph: &Graph, community_map: &HashMap<NodeId, usize>) -> 
         writeln!(out, r#"      <data key="name">{name}</data>"#).unwrap();
         writeln!(out, r#"      <data key="kind">{kind}</data>"#).unwrap();
         writeln!(out, r#"      <data key="file">{file}</data>"#).unwrap();
-        writeln!(out, r#"      <data key="kind_raw">{kind_raw}</data>"#, kind_raw = kind).unwrap();
+        writeln!(
+            out,
+            r#"      <data key="kind_raw">{kind_raw}</data>"#,
+            kind_raw = kind
+        )
+        .unwrap();
         if let Some(cid) = comm_id {
             writeln!(out, r#"      <data key="community_id">{cid}</data>"#).unwrap();
         }
@@ -88,8 +89,16 @@ pub fn export_graphml(graph: &Graph, community_map: &HashMap<NodeId, usize>) -> 
         let score = edge.confidence.score();
         let src_node = graph.node(src);
         let dst_node = graph.node(dst);
-        let src_file = html_escape(&src_node.as_ref().map_or("", |n| n.source_uri.as_deref().unwrap_or("")));
-        let dst_file = html_escape(&dst_node.as_ref().map_or("", |n| n.source_uri.as_deref().unwrap_or("")));
+        let src_file = html_escape(
+            src_node
+                .as_ref()
+                .map_or("", |n| n.source_uri.as_deref().unwrap_or("")),
+        );
+        let dst_file = html_escape(
+            dst_node
+                .as_ref()
+                .map_or("", |n| n.source_uri.as_deref().unwrap_or("")),
+        );
 
         writeln!(
             out,

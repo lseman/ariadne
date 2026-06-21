@@ -505,7 +505,6 @@ fn level_to_u32(level: HeadingLevel) -> u32 {
 }
 
 /// Generate a slug from heading text for use in section qualified names.
-#[allow(dead_code)]
 fn slugify(s: &str) -> String {
     if s.is_empty() {
         return String::new();

@@ -1,18 +1,15 @@
-//! SQLite-backed persistence for an Ariadne graph.
-//!
-//! The schema is intentionally tiny: `nodes`, `edges`, `embeddings`, `meta`.
-//! Every node and edge row carries `valid_from` and `valid_to` SHA columns
-//! so that temporal queries reduce to a `WHERE` clause and never require
-//! a re-parse.
+//! `Store` struct, schema, and DB operations.
 
-use crate::core::{Confidence, Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
+use crate::core::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::query::{edge_row_from_sql, node_row_from_sql};
+
 pub const DEFAULT_EMBEDDING_MODEL: &str = "ariadne-hash-v2";
-const DEFAULT_EMBEDDING_DIM: usize = 384;
+pub const DEFAULT_EMBEDDING_DIM: usize = 384;
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS nodes (
@@ -298,12 +295,7 @@ impl Store {
         for row in rows {
             let (src_db, dst_db, kind_str, conf, conf_class, props_str, vf, vt) = row?;
             let kind: EdgeKind = serde_json::from_value(serde_json::Value::String(kind_str))?;
-            let confidence = match conf_class.as_str() {
-                "extracted" => Confidence::Extracted,
-                "inferred" => Confidence::Inferred(conf as f32),
-                "ambiguous" => Confidence::Ambiguous,
-                _ => Confidence::Inferred(conf as f32),
-            };
+            let confidence = super::query::parse_confidence(&conf_class, conf);
             let edge = Edge {
                 kind,
                 confidence,
@@ -445,7 +437,11 @@ impl Store {
             })?;
             for row in rows {
                 let row = row?;
-                if seen.insert(edge_identity(&row.src_qname, &row.dst_qname, row.edge.kind)) {
+                if seen.insert(super::query::edge_identity(
+                    &row.src_qname,
+                    &row.dst_qname,
+                    row.edge.kind,
+                )) {
                     out.push(row);
                 }
             }
@@ -677,7 +673,7 @@ impl Store {
         if query.trim().is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let fts_query = build_fts5_query(query);
+        let fts_query = super::query::build_fts5_query(query);
         if fts_query.is_empty() {
             return Ok(Vec::new());
         }
@@ -755,11 +751,16 @@ impl Store {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM embeddings", [])?;
         for (node_id, kind, name, qname, source_uri) in rows {
-            let text = embedding_source_text(&kind, &name, &qname, source_uri.as_deref());
-            let vector = semantic_embedding(&text);
+            let text = super::embedding::embedding_source_text(
+                &kind,
+                &name,
+                &qname,
+                source_uri.as_deref(),
+            );
+            let vector = super::embedding::semantic_embedding(&text);
             tx.execute(
                 "INSERT INTO embeddings(node_id, model, vector) VALUES (?1, ?2, ?3)",
-                params![node_id, model, encode_embedding(&vector)],
+                params![node_id, model, super::embedding::encode_embedding(&vector)],
             )?;
         }
         tx.commit()?;
@@ -778,7 +779,7 @@ impl Store {
             return Ok(Vec::new());
         }
 
-        let query_vector = semantic_embedding(query);
+        let query_vector = super::embedding::semantic_embedding(query);
         if query_vector.iter().all(|v| *v == 0.0) {
             return Ok(Vec::new());
         }
@@ -795,10 +796,10 @@ impl Store {
         let mut results = Vec::new();
         for row in rows {
             let (qname, blob) = row?;
-            let Some(vector) = decode_embedding(&blob) else {
+            let Some(vector) = super::embedding::decode_embedding(&blob) else {
                 continue;
             };
-            let score = cosine_similarity(&query_vector, &vector);
+            let score = super::embedding::cosine_similarity(&query_vector, &vector);
             if score >= 0.20 {
                 results.push((qname, score));
             }
@@ -811,597 +812,5 @@ impl Store {
     /// Raw SQL access for temporal and differential queries.
     pub fn conn(&self) -> &Connection {
         &self.conn
-    }
-}
-
-fn embedding_source_text(
-    kind: &str,
-    name: &str,
-    qualified_name: &str,
-    source_uri: Option<&str>,
-) -> String {
-    let mut text = format!("{} {} {}", kind, name, qualified_name.replace("::", " "));
-    if let Some(source_uri) = source_uri {
-        text.push(' ');
-        text.push_str(source_uri);
-    }
-    text
-}
-
-#[allow(clippy::too_many_arguments)]
-fn node_row_from_sql(
-    kind_str: String,
-    qname: String,
-    source_uri: Option<String>,
-    line_start: Option<u32>,
-    line_end: Option<u32>,
-    properties: String,
-    valid_from: Option<String>,
-    valid_to: Option<String>,
-) -> Node {
-    let kind: NodeKind =
-        serde_json::from_value(serde_json::Value::String(kind_str)).unwrap_or(NodeKind::Function);
-    let mut node = Node::new(kind, qname);
-    node.source_uri = source_uri;
-    node.line_start = line_start;
-    node.line_end = line_end;
-    node.properties = serde_json::from_str(&properties).unwrap_or_default();
-    node.valid_from = valid_from;
-    node.valid_to = valid_to;
-    node
-}
-
-fn edge_row_from_sql(
-    kind_str: String,
-    confidence: f64,
-    conf_class: String,
-    properties: String,
-    valid_from: Option<String>,
-    valid_to: Option<String>,
-) -> Edge {
-    let kind: EdgeKind =
-        serde_json::from_value(serde_json::Value::String(kind_str)).unwrap_or(EdgeKind::Calls);
-    let confidence = match conf_class.as_str() {
-        "extracted" => Confidence::Extracted,
-        "inferred" => Confidence::Inferred(confidence as f32),
-        "ambiguous" => Confidence::Ambiguous,
-        _ => Confidence::Inferred(confidence as f32),
-    };
-    Edge {
-        kind,
-        confidence,
-        properties: serde_json::from_str(&properties).unwrap_or_default(),
-        valid_from,
-        valid_to,
-    }
-}
-
-pub fn edge_identity(src_qname: &str, dst_qname: &str, kind: EdgeKind) -> String {
-    format!("{}\u{1f}{}\u{1f}{:?}", src_qname, dst_qname, kind)
-}
-
-/// Build a local feature-hash embedding for a text string.
-pub fn semantic_embedding(text: &str) -> Vec<f32> {
-    let mut vector = vec![0.0; DEFAULT_EMBEDDING_DIM];
-    let tokens = semantic_tokens(text);
-    if tokens.is_empty() {
-        return vector;
-    }
-
-    let unique_tokens = unique_ordered(&tokens);
-    for token in &tokens {
-        push_signed_hashed_feature(&mut vector, &format!("tok:{token}"), 1.25);
-        push_signed_hashed_feature(&mut vector, &format!("stem:{}", code_stem(token)), 0.70);
-        let canonical = canonical_token(token);
-        if canonical != *token {
-            push_signed_hashed_feature(&mut vector, &format!("canon:{canonical}"), 1.05);
-        }
-        for gram in char_ngrams(token, 3, 5) {
-            push_signed_hashed_feature(&mut vector, &format!("char:{gram}"), 0.24);
-        }
-        for piece in token_pieces(token) {
-            push_signed_hashed_feature(&mut vector, &format!("piece:{piece}"), 0.42);
-        }
-    }
-
-    for pair in tokens.windows(2) {
-        push_signed_hashed_feature(&mut vector, &format!("bi:{}:{}", pair[0], pair[1]), 0.82);
-        let left = canonical_token(&pair[0]);
-        let right = canonical_token(&pair[1]);
-        if left != pair[0] || right != pair[1] {
-            push_signed_hashed_feature(&mut vector, &format!("cbi:{left}:{right}"), 0.58);
-        }
-    }
-    for triple in tokens.windows(3) {
-        push_signed_hashed_feature(
-            &mut vector,
-            &format!("tri:{}:{}:{}", triple[0], triple[1], triple[2]),
-            0.36,
-        );
-        push_signed_hashed_feature(
-            &mut vector,
-            &format!("skip:{}:{}", triple[0], triple[2]),
-            0.28,
-        );
-    }
-
-    let acronym: String = unique_tokens
-        .iter()
-        .filter_map(|token| token.chars().next())
-        .collect();
-    if acronym.len() >= 2 {
-        push_signed_hashed_feature(&mut vector, &format!("acro:{acronym}"), 0.85);
-    }
-
-    for concept in semantic_concepts(&unique_tokens) {
-        push_signed_hashed_feature(&mut vector, &format!("concept:{concept}"), 3.0);
-    }
-
-    normalize_vector(&mut vector);
-    vector
-}
-
-fn semantic_tokens(raw: &str) -> Vec<String> {
-    let mut normalized = String::new();
-    let mut prev: Option<char> = None;
-    let mut chars = raw.chars().peekable();
-    while let Some(c) = chars.next() {
-        let next = chars.peek().copied();
-        if c.is_ascii_alphanumeric() {
-            if let Some(p) = prev {
-                let camel_boundary = p.is_ascii_lowercase() && c.is_ascii_uppercase();
-                let acronym_boundary = p.is_ascii_uppercase()
-                    && c.is_ascii_uppercase()
-                    && next.is_some_and(|n| n.is_ascii_lowercase());
-                let digit_boundary = p.is_ascii_alphabetic() != c.is_ascii_alphabetic();
-                if camel_boundary || acronym_boundary || digit_boundary {
-                    normalized.push(' ');
-                }
-            }
-            normalized.push(c.to_ascii_lowercase());
-            prev = Some(c);
-        } else {
-            normalized.push(' ');
-            prev = None;
-        }
-    }
-
-    normalized
-        .split_whitespace()
-        .map(singularize_token)
-        .filter(|token| !token.is_empty())
-        .collect()
-}
-
-fn unique_ordered(tokens: &[String]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for token in tokens {
-        if seen.insert(token.as_str()) {
-            out.push(token.clone());
-        }
-    }
-    out
-}
-
-fn singularize_token(token: &str) -> String {
-    if token.len() > 4 && token.ends_with('s') {
-        token[..token.len() - 1].to_string()
-    } else {
-        token.to_string()
-    }
-}
-
-fn canonical_token(token: &str) -> String {
-    match token {
-        "delete" | "deleted" | "remove" | "removed" | "drop" | "purge" | "cleanup" => {
-            "remove".to_string()
-        }
-        "add" | "added" | "create" | "created" | "insert" | "new" => "add".to_string(),
-        "change" | "changed" | "changes" | "diff" | "delta" | "modify" | "modified" | "update"
-        | "updated" => "change".to_string(),
-        "find" | "search" | "lookup" | "query" | "discover" => "search".to_string(),
-        "auth" | "authenticate" | "authentication" | "login" | "signin" | "signon" => {
-            "auth".to_string()
-        }
-        "test" | "tests" | "spec" | "specs" | "coverage" => "test".to_string(),
-        "bug" | "defect" | "error" | "failure" | "panic" | "regression" => "bug".to_string(),
-        "cache" | "cached" | "memo" | "memoize" | "memoized" => "cache".to_string(),
-        "config" | "configuration" | "setting" | "settings" => "config".to_string(),
-        "db" | "database" | "sqlite" | "store" | "storage" | "persist" | "persistence" => {
-            "storage".to_string()
-        }
-        "doc" | "docs" | "document" | "documentation" | "readme" => "doc".to_string(),
-        "embed" | "embedding" | "embeddings" | "semantic" | "vector" | "vectors" => {
-            "embedding".to_string()
-        }
-        "file" | "files" | "path" | "paths" | "source" | "sources" => "source".to_string(),
-        "graph" | "node" | "nodes" | "edge" | "edges" | "flow" | "flows" => "graph".to_string(),
-        "http" | "server" | "serve" | "route" | "routes" => "server".to_string(),
-        "ignore" | "gitignore" | "ariadneignore" | "exclude" | "skip" => "ignore".to_string(),
-        "index" | "indexed" | "indexing" | "fts" | "fts5" => "index".to_string(),
-        "install" | "installer" | "setup" | "hook" | "hooks" => "install".to_string(),
-        "json" | "mcp" | "tool" | "tools" | "agent" | "agents" => "agent".to_string(),
-        "rank" | "ranking" | "score" | "scored" | "scoring" | "boost" | "boosted" => {
-            "rank".to_string()
-        }
-        "read" | "reader" | "parse" | "parser" | "extract" | "extraction" => "extract".to_string(),
-        "review" | "risk" | "impact" | "blast" | "radius" => "review".to_string(),
-        "symbol" | "symbols" | "function" | "functions" | "method" | "methods" => {
-            "symbol".to_string()
-        }
-        "terminal" | "tui" | "ui" | "viewer" | "view" => "ui".to_string(),
-        "watch" | "daemon" | "poll" | "polling" => "watch".to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn code_stem(token: &str) -> String {
-    let mut stem = singularize_token(token);
-    for suffix in ["ing", "ed", "er", "or", "able", "ible", "tion", "ions"] {
-        if stem.len() > suffix.len() + 3 && stem.ends_with(suffix) {
-            stem.truncate(stem.len() - suffix.len());
-            break;
-        }
-    }
-    stem
-}
-
-fn token_pieces(token: &str) -> Vec<String> {
-    let chars: Vec<char> = token.chars().collect();
-    if chars.len() <= 3 {
-        return Vec::new();
-    }
-    let mut pieces = Vec::new();
-    for len in [3usize, 4, 5] {
-        if chars.len() >= len {
-            pieces.push(chars[..len].iter().collect());
-            pieces.push(chars[chars.len() - len..].iter().collect());
-        }
-    }
-    pieces.sort();
-    pieces.dedup();
-    pieces
-}
-
-fn semantic_concepts(tokens: &[String]) -> Vec<&'static str> {
-    let has = |words: &[&str]| tokens.iter().any(|token| words.contains(&token.as_str()));
-    let mut concepts = Vec::new();
-    if has(&["embed", "embedding", "semantic", "vector"]) {
-        concepts.push("embedding");
-    }
-    if has(&["delete", "remove", "drop", "purge"]) && has(&["file", "source", "node", "edge"]) {
-        concepts.push("delete-source");
-    }
-    if has(&["test", "spec", "coverage"]) && has(&["risk", "review", "change", "diff"]) {
-        concepts.push("review-coverage");
-    }
-    if has(&["embed", "embedding", "semantic", "vector"]) && has(&["search", "rank", "score"]) {
-        concepts.push("semantic-search");
-    }
-    if has(&["mcp", "tool", "agent", "json"]) {
-        concepts.push("agent-interface");
-    }
-    if has(&["config", "mcp", "setup"]) || has(&["watch", "daemon", "hook", "install"]) {
-        concepts.push("automation");
-    }
-    if has(&["graph", "node", "edge", "flow"]) && has(&["rank", "impact", "path", "community"]) {
-        concepts.push("graph-reasoning");
-    }
-    concepts
-}
-
-fn char_ngrams(token: &str, min_n: usize, max_n: usize) -> Vec<String> {
-    let chars: Vec<char> = token.chars().collect();
-    let mut out = Vec::new();
-    for n in min_n..=max_n {
-        if chars.len() < n {
-            continue;
-        }
-        for i in 0..=chars.len() - n {
-            out.push(chars[i..i + n].iter().collect());
-        }
-    }
-    out
-}
-
-fn push_signed_hashed_feature(vector: &mut [f32], feature: &str, weight: f32) {
-    let hash = stable_hash64(feature.as_bytes(), 0xcbf29ce484222325);
-    let index = (hash as usize) % vector.len();
-    let sign = if stable_hash64(feature.as_bytes(), 0x9e3779b97f4a7c15) & 1 == 0 {
-        1.0
-    } else {
-        -1.0
-    };
-    vector[index] += sign * weight;
-}
-
-fn stable_hash64(bytes: &[u8], seed: u64) -> u64 {
-    let mut hash = seed;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
-fn normalize_vector(vector: &mut [f32]) {
-    let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for value in vector {
-            *value /= norm;
-        }
-    }
-}
-
-fn encode_embedding(vector: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(std::mem::size_of_val(vector));
-    for value in vector {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
-}
-
-fn decode_embedding(blob: &[u8]) -> Option<Vec<f32>> {
-    if blob.len() % std::mem::size_of::<f32>() != 0 {
-        return None;
-    }
-    let mut vector = Vec::with_capacity(blob.len() / std::mem::size_of::<f32>());
-    for chunk in blob.chunks_exact(std::mem::size_of::<f32>()) {
-        vector.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Some(vector)
-}
-
-fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
-    if left.len() != right.len() || left.is_empty() {
-        return 0.0;
-    }
-    let mut dot = 0.0;
-    let mut left_norm = 0.0;
-    let mut right_norm = 0.0;
-    for (l, r) in left.iter().zip(right.iter()) {
-        dot += l * r;
-        left_norm += l * l;
-        right_norm += r * r;
-    }
-    if left_norm == 0.0 || right_norm == 0.0 {
-        0.0
-    } else {
-        dot / (left_norm.sqrt() * right_norm.sqrt())
-    }
-}
-
-/// Build a safe FTS5 MATCH expression from a raw user query.
-///
-/// Each whitespace/punctuation-separated token becomes a prefix term (`token*`).
-/// Special FTS5 syntax characters are stripped to prevent query parse errors.
-pub(crate) fn build_fts5_query(raw: &str) -> String {
-    let tokens: Vec<String> = raw
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|t| !t.is_empty())
-        .map(|t| {
-            let clean: String = t
-                .chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            clean
-        })
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("{}*", t))
-        .collect();
-    if tokens.is_empty() {
-        return String::new();
-    }
-    // Tokens joined by space = AND in FTS5; each token is a prefix match.
-    tokens.join(" ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::{EdgeKind, NodeKind};
-
-    #[test]
-    fn round_trip_in_memory() {
-        let mut g = Graph::new();
-        let a = g.add_node(Node::new(NodeKind::Function, "m::f"));
-        let b = g.add_node(Node::new(NodeKind::Function, "m::g"));
-        g.add_edge(a, b, Edge::extracted(EdgeKind::Calls));
-
-        let mut s = Store::open_in_memory().unwrap();
-        s.save(&g).unwrap();
-        let loaded = s.load().unwrap();
-        assert_eq!(loaded.node_count(), 2);
-        assert_eq!(loaded.edge_count(), 1);
-        assert!(loaded.find_by_qname("m::f").is_some());
-    }
-
-    #[test]
-    fn fts_search_finds_node_by_name() {
-        let mut g = Graph::new();
-        g.add_node(Node::new(NodeKind::Function, "mymod::detect_changes"));
-        g.add_node(Node::new(NodeKind::Function, "mymod::graph_builder"));
-        g.add_node(Node::new(NodeKind::Class, "mymod::GraphNode"));
-
-        let mut s = Store::open_in_memory().unwrap();
-        s.save(&g).unwrap();
-
-        let hits = s.fts_search("detect", 10).unwrap();
-        assert!(
-            !hits.is_empty(),
-            "expected at least one FTS hit for 'detect'"
-        );
-        assert!(hits.iter().any(|(qn, _)| qn == "mymod::detect_changes"));
-    }
-
-    #[test]
-    fn fts_search_prefix_match() {
-        let mut g = Graph::new();
-        g.add_node(Node::new(NodeKind::Function, "ns::graph_traversal"));
-        g.add_node(Node::new(NodeKind::Function, "ns::path_finder"));
-
-        let mut s = Store::open_in_memory().unwrap();
-        s.save(&g).unwrap();
-
-        let hits = s.fts_search("graph", 10).unwrap();
-        assert!(hits.iter().any(|(qn, _)| qn == "ns::graph_traversal"));
-        // unrelated node should not appear
-        assert!(!hits.iter().any(|(qn, _)| qn == "ns::path_finder"));
-    }
-
-    #[test]
-    fn fts_search_empty_query_returns_empty() {
-        let mut g = Graph::new();
-        g.add_node(Node::new(NodeKind::Function, "ns::f"));
-        let mut s = Store::open_in_memory().unwrap();
-        s.save(&g).unwrap();
-        assert!(s.fts_search("", 10).unwrap().is_empty());
-        assert!(s.fts_search("  ", 10).unwrap().is_empty());
-    }
-
-    #[test]
-    fn rebuild_fts_index_reports_indexed_rows() {
-        let mut g = Graph::new();
-        g.add_node(Node::new(NodeKind::Function, "ns::alpha_search"));
-        g.add_node(Node::new(NodeKind::Class, "ns::BetaSearch"));
-        let mut s = Store::open_in_memory().unwrap();
-        s.save(&g).unwrap();
-
-        let count = s.rebuild_fts_index().unwrap();
-        assert_eq!(count, 2);
-        assert_eq!(s.fts_stats().unwrap(), 2);
-        assert!(!s.fts_search("alpha", 10).unwrap().is_empty());
-    }
-
-    #[test]
-    fn load_temporal_includes_archived_rows() {
-        // Save an active graph, archive one node, then confirm load()
-        // omits the archived row while load_temporal() includes it with
-        // its closing commit intact.
-        let mut g = Graph::new();
-        let mut keep = Node::new(NodeKind::Function, "m::keep");
-        keep.valid_from = Some("c1".to_string());
-        keep.source_uri = Some("src/a.rs".to_string());
-        g.add_node(keep);
-
-        let mut s = Store::open_in_memory().unwrap();
-        s.save(&g).unwrap();
-
-        let mut gone = Node::new(NodeKind::Function, "m::gone");
-        gone.valid_from = Some("c1".to_string());
-        gone.source_uri = Some("src/a.rs".to_string());
-        s.archive_nodes(&[StoredNodeRow { node: gone }], "c2")
-            .unwrap();
-
-        let active = s.load().unwrap();
-        assert!(active.find_by_qname("m::keep").is_some());
-        assert!(
-            active.find_by_qname("m::gone").is_none(),
-            "load() must not surface archived rows"
-        );
-
-        let temporal = s.load_temporal().unwrap();
-        let gone_id = temporal
-            .find_by_qname("m::gone")
-            .expect("load_temporal must surface archived rows");
-        let gone_node = temporal.node(gone_id).unwrap();
-        assert_eq!(gone_node.valid_from.as_deref(), Some("c1"));
-        assert_eq!(gone_node.valid_to.as_deref(), Some("c2"));
-    }
-
-    #[test]
-    fn fts_search_multi_word_matches_snake_case() {
-        // With separators "_", "detect_changes" indexes as tokens "detect" + "changes".
-        // A two-word query "detect changes" should AND-match both tokens.
-        let mut g = Graph::new();
-        g.add_node(Node::new(NodeKind::Function, "mymod::detect_changes"));
-        g.add_node(Node::new(NodeKind::Function, "mymod::detect_errors"));
-        g.add_node(Node::new(NodeKind::Function, "mymod::apply_changes"));
-
-        let mut s = Store::open_in_memory().unwrap();
-        s.save(&g).unwrap();
-
-        let hits = s.fts_search("detect changes", 10).unwrap();
-        // Only "detect_changes" contains both tokens.
-        assert_eq!(
-            hits.len(),
-            1,
-            "expected only detect_changes to match 'detect changes'"
-        );
-        assert_eq!(hits[0].0, "mymod::detect_changes");
-    }
-
-    #[test]
-    fn delete_sources_removes_fts_rows() {
-        let mut g = Graph::new();
-        let mut n = Node::new(NodeKind::Function, "mod::stale_fn");
-        n.source_uri = Some("src/stale.rs".to_string());
-        g.add_node(n);
-        let mut n2 = Node::new(NodeKind::Function, "mod::keep_fn");
-        n2.source_uri = Some("src/keep.rs".to_string());
-        g.add_node(n2);
-
-        let mut s = Store::open_in_memory().unwrap();
-        s.save(&g).unwrap();
-
-        // confirm both are searchable
-        assert!(!s.fts_search("stale", 10).unwrap().is_empty());
-        assert!(!s.fts_search("keep", 10).unwrap().is_empty());
-
-        s.delete_sources(&["src/stale.rs".to_string()]).unwrap();
-
-        // stale_fn must be gone from FTS
-        assert!(
-            s.fts_search("stale", 10).unwrap().is_empty(),
-            "stale FTS row should be removed"
-        );
-        // keep_fn must still be found
-        assert!(!s.fts_search("keep", 10).unwrap().is_empty());
-    }
-
-    #[test]
-    fn build_fts5_query_produces_prefix_terms() {
-        assert_eq!(build_fts5_query("detect changes"), "detect* changes*");
-        assert_eq!(build_fts5_query("graph"), "graph*");
-        assert_eq!(build_fts5_query("detect_changes"), "detect_changes*");
-        assert!(build_fts5_query("").is_empty());
-    }
-
-    #[test]
-    fn semantic_search_finds_related_terms() {
-        let mut g = Graph::new();
-        g.add_node(Node::new(NodeKind::Function, "pkg::remove_sources"));
-        g.add_node(Node::new(NodeKind::Function, "pkg::build_graph"));
-
-        let mut s = Store::open_in_memory().unwrap();
-        s.save(&g).unwrap();
-        s.rebuild_embeddings(DEFAULT_EMBEDDING_MODEL).unwrap();
-
-        let hits = s.semantic_search("delete source", 5).unwrap();
-        assert!(!hits.is_empty());
-        assert_eq!(hits[0].0, "pkg::remove_sources");
-    }
-
-    #[test]
-    fn hash_v2_captures_code_aware_semantic_concepts() {
-        let mut g = Graph::new();
-        g.add_node(Node::new(NodeKind::Function, "pkg::rebuild_embeddings"));
-        g.add_node(Node::new(NodeKind::Function, "pkg::install_mcp_config"));
-        g.add_node(Node::new(NodeKind::Function, "pkg::compute_flows"));
-
-        let mut s = Store::open_in_memory().unwrap();
-        s.save(&g).unwrap();
-        s.rebuild_embeddings(DEFAULT_EMBEDDING_MODEL).unwrap();
-
-        let semantic_hits = s
-            .semantic_search("vector semantic search ranking", 5)
-            .unwrap();
-        assert!(!semantic_hits.is_empty());
-        assert_eq!(semantic_hits[0].0, "pkg::rebuild_embeddings");
-
-        let agent_hits = s.semantic_search("agent json tool setup", 5).unwrap();
-        assert!(!agent_hits.is_empty());
-        assert_eq!(agent_hits[0].0, "pkg::install_mcp_config");
     }
 }

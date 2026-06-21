@@ -12,30 +12,27 @@ mod temporal;
 
 use anyhow::{bail, Result};
 use ariadne_graph::Graph;
-use serde_json::{json, Value, Map};
+use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::RwLockWriteGuard;
 
 pub use analysis::{
-    articulation_json, bridge_nodes_json, core_json, cycles_json, diagnostics_json,
-    gaps_json, large_functions_json, surprises_json,
+    articulation_json, bridge_nodes_json, core_json, cycles_json, diagnostics_json, gaps_json,
+    large_functions_json, surprises_json,
 };
 pub use architecture::architecture_overview_json;
 pub use context::minimal_context_json;
-pub use flows::{
-    handle_affected_flows, handle_blast_radius, handle_flows, handle_test_coverage,
-};
+pub use flows::{handle_affected_flows, handle_blast_radius, handle_flows, handle_test_coverage};
+pub use hints::SessionState;
 pub use impact::{handle_god_nodes, handle_impact};
 pub use paths::handle_paths;
 pub use reports::generate_report_markdown;
 pub use reviews::{
-    counterfactual_json, motifs_json, review_context_json, suggested_questions_json,
-    traverse_json,
+    counterfactual_json, motifs_json, review_context_json, suggested_questions_json, traverse_json,
 };
 pub use search::handle_search;
 pub use temporal::{detect_changes_json, graph_diff_json};
-pub use hints::SessionState;
 
 pub type ResponseSession = std::sync::RwLock<hints::SessionState>;
 
@@ -245,7 +242,11 @@ fn _tool_response(
             let result = ariadne_graph::query::knowledge_gaps(&graph);
             // Truncate each category to limit
             let mut out = result.as_object().cloned().unwrap_or_default();
-            for key in ["isolated_nodes", "untested_hotspots", "single_file_communities"] {
+            for key in [
+                "isolated_nodes",
+                "untested_hotspots",
+                "single_file_communities",
+            ] {
                 if let Some(arr) = out.get_mut(key).and_then(Value::as_array_mut) {
                     arr.truncate(limit);
                 }
@@ -290,21 +291,25 @@ fn _tool_response(
         "rename_preview" => {
             let target = required_str(params, "target")?;
             let new_name = required_str(params, "new_name")?;
-            let preview = ariadne_graph::query::rename_preview(&graph, target, &new_name)
+            let preview = ariadne_graph::query::rename_preview(&graph, target, new_name)
                 .ok_or_else(|| anyhow::anyhow!("node not found: {}", target))?;
-            let edits: Vec<_> = preview.edits.iter().map(|e| {
-                json!({
-                    "file": e.file,
-                    "line": e.line,
-                    "old": e.old,
-                    "new": e.new,
-                    "confidence": match e.confidence {
-                        ariadne_graph::query::Confidence::High => "high",
-                        ariadne_graph::query::Confidence::Medium => "medium",
-                        ariadne_graph::query::Confidence::Low => "low",
-                    },
+            let edits: Vec<_> = preview
+                .edits
+                .iter()
+                .map(|e| {
+                    json!({
+                        "file": e.file,
+                        "line": e.line,
+                        "old": e.old,
+                        "new": e.new,
+                        "confidence": match e.confidence {
+                            ariadne_graph::query::Confidence::High => "high",
+                            ariadne_graph::query::Confidence::Medium => "medium",
+                            ariadne_graph::query::Confidence::Low => "low",
+                        },
+                    })
                 })
-            }).collect();
+                .collect();
             compact_for_detail(
                 json!({
                     "operation": "rename_preview",
@@ -336,10 +341,7 @@ fn _tool_response(
                 .get("threshold")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.25);
-            let min_size = params
-                .get("min_size")
-                .and_then(Value::as_u64)
-                .unwrap_or(10) as usize;
+            let min_size = params.get("min_size").and_then(Value::as_u64).unwrap_or(10) as usize;
             let original = ariadne_graph::query::leiden(&graph);
             let split = ariadne_graph::query::split_oversized(&graph, threshold, min_size);
 
@@ -380,7 +382,11 @@ fn _tool_response(
     };
     let response = apply_response_guardrails(response, &graph, params, detail);
     // Attach hints (suppress if caller disables them)
-    if params.get("no_hints").and_then(Value::as_bool).unwrap_or(false) {
+    if params
+        .get("no_hints")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         Ok(response)
     } else {
         let hints = hints::generate_hints(operation, &response, session);

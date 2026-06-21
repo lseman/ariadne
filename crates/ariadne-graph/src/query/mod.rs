@@ -29,9 +29,9 @@ pub mod structure;
 
 pub use centrality::{is_rank_noise, pagerank, personalized_pagerank};
 pub use communities::{
-    community_cohesion, community_quality, infomap, infomap_with_options, knowledge_gaps,
-    leiden, leiden_with_options, louvain, louvain_with_options, split_oversized,
-    CommunityObjective, CommunityOptions, CommunityQuality, LOW_COHESION_THRESHOLD,
+    community_cohesion, community_quality, infomap, infomap_with_options, knowledge_gaps, leiden,
+    leiden_with_options, louvain, louvain_with_options, split_oversized, CommunityObjective,
+    CommunityOptions, CommunityQuality, LOW_COHESION_THRESHOLD,
 };
 pub use dedup::{deduplicate_nodes, DedupOptions, DedupResult};
 pub use differential::{
@@ -39,9 +39,9 @@ pub use differential::{
 };
 pub use impact::{analyze_impact, ImpactHit, ImpactQuery};
 pub use paths::{callees_of, callers_of, find_paths, find_top_paths, PathQuery, WeightedPath};
+pub use refactor::{find_dead_code, rename_preview, Confidence, RenameEdit, RenamePreview};
 pub use search::{fts_ranked_search, ranked_search, search_by_name, SearchHit};
 pub use semsearch::{find_related, semantic_query, SemanticHit};
-pub use refactor::{find_dead_code, rename_preview, Confidence, RenameEdit, RenamePreview};
 pub use structure::{
     approx_betweenness, articulation_points, bridge_scores, call_resolution_stats, core_numbers,
     cyclic_components, hub_nodes, strongly_connected_components, BridgeScore, CallResolution,

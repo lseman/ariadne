@@ -4,8 +4,8 @@
 //! determine the impact of refactoring changes. No source files are
 //! written to — only edit suggestions are produced.
 
-use crate::core::{Graph, NodeId, NodeKind};
 use crate::core::EdgeKind;
+use crate::core::{Graph, NodeId, NodeKind};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
@@ -56,11 +56,7 @@ pub struct RenameStats {
 /// 4. All reference sites (where the symbol appears as a node neighbor)
 ///
 /// Returns a preview without modifying anything.
-pub fn rename_preview(
-    graph: &Graph,
-    qname: &str,
-    new_name: &str,
-) -> Option<RenamePreview> {
+pub fn rename_preview(graph: &Graph, qname: &str, new_name: &str) -> Option<RenamePreview> {
     let target_id = graph.find_by_qname(qname)?;
     let target_node = graph.node(target_id)?;
 
@@ -121,7 +117,7 @@ pub fn rename_preview(
     for (_, src, dst, _edge) in graph.edges() {
         if src == target_id && dst != target_id {
             let dst_node = graph.node(dst);
-            if let Some(ref dnode) = dst_node {
+            if let Some(dnode) = dst_node {
                 // If the target node references another node, and that node's
                 // name contains the old name pattern, it might be a bare-name ref
                 if dnode.name.contains(&target_node.name)
@@ -177,14 +173,20 @@ pub fn rename_preview(
 pub fn find_dead_code(graph: &Graph, limit: usize) -> Vec<Value> {
     // Collect entry-point names and patterns
     let entry_name_patterns = [
-        "main", "main_", "test_", "Test", "Handle", "handle_", "serve", "run",
-        "start", "entry", "init", "setup", "new", "default",
+        "main", "main_", "test_", "Test", "Handle", "handle_", "serve", "run", "start", "entry",
+        "init", "setup", "new", "default",
     ];
 
     // Collect framework base class suffixes (used in is_framework_inherited)
     let _framework_suffixes = [
-        "Stack", "Construct", "Resource", "Pipeline", "Model", "BaseModel",
-        "BaseSettings", "DeclarativeBase",
+        "Stack",
+        "Construct",
+        "Resource",
+        "Pipeline",
+        "Model",
+        "BaseModel",
+        "BaseSettings",
+        "DeclarativeBase",
     ];
 
     // Build set of nodes that ARE called, imported, or referenced
@@ -232,8 +234,10 @@ pub fn find_dead_code(graph: &Graph, limit: usize) -> Vec<Value> {
     let mut dead: Vec<(NodeId, &crate::core::Node)> = graph
         .nodes()
         .filter(|(_, n)| {
-            matches!(n.kind, NodeKind::Function | NodeKind::Method | NodeKind::Class)
-                && !n.qualified_name.starts_with("call::")
+            matches!(
+                n.kind,
+                NodeKind::Function | NodeKind::Method | NodeKind::Class
+            ) && !n.qualified_name.starts_with("call::")
         })
         .filter(|(id, n)| {
             // Skip if called
@@ -268,8 +272,7 @@ pub fn find_dead_code(graph: &Graph, limit: usize) -> Vec<Value> {
     dead.sort_by(|a, b| a.1.qualified_name.cmp(&b.1.qualified_name));
     dead.truncate(limit);
 
-    dead
-        .into_iter()
+    dead.into_iter()
         .map(|(_, n)| {
             json!({
                 "qualified_name": n.qualified_name,
@@ -296,14 +299,19 @@ fn is_entry_point(node: &crate::core::Node, patterns: &[&str]) -> bool {
 }
 
 /// Check if a class inherits from framework base classes.
-fn is_framework_inherited(
-    node: &crate::core::Node,
-    _inherited_classes: &HashSet<NodeId>,
-) -> bool {
+fn is_framework_inherited(node: &crate::core::Node, _inherited_classes: &HashSet<NodeId>) -> bool {
     // Check name suffixes (common for CDK/IaC constructs)
     let suffixes = [
-        "Stack", "Construct", "Resource", "Pipeline", "Model", "BaseModel",
-        "BaseSettings", "DeclarativeBase", "TableBase", "App",
+        "Stack",
+        "Construct",
+        "Resource",
+        "Pipeline",
+        "Model",
+        "BaseModel",
+        "BaseSettings",
+        "DeclarativeBase",
+        "TableBase",
+        "App",
     ];
     for suffix in &suffixes {
         if node.name.ends_with(suffix) {
@@ -326,8 +334,11 @@ fn is_test_file(node: &crate::core::Node) -> bool {
             || lower.contains("/test_")
             || lower.contains("/e2e_test")
             || lower.contains("/test_utils")
-            || lower == "tests/" || lower.starts_with("tests/") || lower.starts_with("test/")
-            || lower.contains("/tests/") || lower.contains("/test/")
+            || lower == "tests/"
+            || lower.starts_with("tests/")
+            || lower.starts_with("test/")
+            || lower.contains("/tests/")
+            || lower.contains("/test/")
     } else {
         false
     }
@@ -374,15 +385,18 @@ mod tests {
     #[test]
     fn rename_preview_finds_call_sites() {
         let mut g = Graph::new();
-        let lib = g.add_node(
-            Node::new(NodeKind::File, "file::src/lib.rs").with_source("src/lib.rs", 1, 100),
-        );
-        let foo = g.add_node(
-            Node::new(NodeKind::Function, "pkg::foo").with_source("src/lib.rs", 5, 10),
-        );
-        let bar = g.add_node(
-            Node::new(NodeKind::Function, "pkg::bar").with_source("src/main.rs", 10, 20),
-        );
+        let lib = g.add_node(Node::new(NodeKind::File, "file::src/lib.rs").with_source(
+            "src/lib.rs",
+            1,
+            100,
+        ));
+        let foo =
+            g.add_node(Node::new(NodeKind::Function, "pkg::foo").with_source("src/lib.rs", 5, 10));
+        let bar = g.add_node(Node::new(NodeKind::Function, "pkg::bar").with_source(
+            "src/main.rs",
+            10,
+            20,
+        ));
         g.add_edge(lib, foo, Edge::extracted(EdgeKind::Defines));
         g.add_edge(lib, bar, Edge::extracted(EdgeKind::Defines));
         g.add_edge(bar, foo, Edge::extracted(EdgeKind::Calls)); // bar calls foo
@@ -393,21 +407,26 @@ mod tests {
         assert!(preview.edits.len() >= 2); // definition + at least one call site
 
         // Find the call site edit
-        let call_edit = preview.edits.iter().find(|e| {
-            e.file.as_deref() == Some("src/main.rs") && e.confidence == Confidence::High
-        });
+        let call_edit = preview
+            .edits
+            .iter()
+            .find(|e| e.file.as_deref() == Some("src/main.rs") && e.confidence == Confidence::High);
         assert!(call_edit.is_some(), "should find call site in main.rs");
     }
 
     #[test]
     fn rename_preview_no_calls_returns_definition_only() {
         let mut g = Graph::new();
-        let lib = g.add_node(
-            Node::new(NodeKind::File, "file::src/lib.rs").with_source("src/lib.rs", 1, 100),
-        );
-        let unused = g.add_node(
-            Node::new(NodeKind::Function, "pkg::unused_fn").with_source("src/lib.rs", 50, 55),
-        );
+        let lib = g.add_node(Node::new(NodeKind::File, "file::src/lib.rs").with_source(
+            "src/lib.rs",
+            1,
+            100,
+        ));
+        let unused = g.add_node(Node::new(NodeKind::Function, "pkg::unused_fn").with_source(
+            "src/lib.rs",
+            50,
+            55,
+        ));
         g.add_edge(lib, unused, Edge::extracted(EdgeKind::Defines));
         // No edges pointing TO unused_fn
 
@@ -419,21 +438,30 @@ mod tests {
     #[test]
     fn find_dead_code_excludes_called_functions() {
         let mut g = Graph::new();
-        let lib = g.add_node(
-            Node::new(NodeKind::File, "file::src/lib.rs").with_source("src/lib.rs", 1, 100),
-        );
-        let alive = g.add_node(
-            Node::new(NodeKind::Function, "pkg::alive").with_source("src/lib.rs", 10, 15),
-        );
-        let dead = g.add_node(
-            Node::new(NodeKind::Function, "pkg::dead_fn").with_source("src/lib.rs", 50, 55),
-        );
+        let lib = g.add_node(Node::new(NodeKind::File, "file::src/lib.rs").with_source(
+            "src/lib.rs",
+            1,
+            100,
+        ));
+        let alive = g.add_node(Node::new(NodeKind::Function, "pkg::alive").with_source(
+            "src/lib.rs",
+            10,
+            15,
+        ));
+        let dead = g.add_node(Node::new(NodeKind::Function, "pkg::dead_fn").with_source(
+            "src/lib.rs",
+            50,
+            55,
+        ));
         g.add_edge(lib, alive, Edge::extracted(EdgeKind::Defines));
         g.add_edge(lib, dead, Edge::extracted(EdgeKind::Defines));
         g.add_edge(alive, alive, Edge::extracted(EdgeKind::Calls)); // alive calls itself
 
         let dead_nodes = find_dead_code(&g, 100);
-        let dead_names: Vec<_> = dead_nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
+        let dead_names: Vec<_> = dead_nodes
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
         assert!(dead_names.contains(&"dead_fn"));
         assert!(!dead_names.contains(&"alive"));
     }
@@ -441,54 +469,66 @@ mod tests {
     #[test]
     fn find_dead_code_excludes_entry_points() {
         let mut g = Graph::new();
-        let lib = g.add_node(
-            Node::new(NodeKind::File, "file::src/lib.rs").with_source("src/lib.rs", 1, 100),
-        );
-        let main_fn = g.add_node(
-            Node::new(NodeKind::Function, "pkg::main").with_source("src/lib.rs", 1, 5),
-        );
+        let lib = g.add_node(Node::new(NodeKind::File, "file::src/lib.rs").with_source(
+            "src/lib.rs",
+            1,
+            100,
+        ));
+        let main_fn =
+            g.add_node(Node::new(NodeKind::Function, "pkg::main").with_source("src/lib.rs", 1, 5));
         g.add_edge(lib, main_fn, Edge::extracted(EdgeKind::Defines));
 
         let dead_nodes = find_dead_code(&g, 100);
-        let dead_names: Vec<_> = dead_nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
+        let dead_names: Vec<_> = dead_nodes
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
         assert!(!dead_names.contains(&"main"));
     }
 
     #[test]
     fn find_dead_code_excludes_test_files() {
         let mut g = Graph::new();
-        let test_file = g.add_node(
-            Node::new(NodeKind::File, "file::tests/mod.rs")
-                .with_source("tests/unit.rs", 1, 50),
-        );
+        let test_file = g.add_node(Node::new(NodeKind::File, "file::tests/mod.rs").with_source(
+            "tests/unit.rs",
+            1,
+            50,
+        ));
         let test_fn = g.add_node(
             Node::new(NodeKind::Function, "pkg::test_helper").with_source("tests/unit.rs", 10, 15),
         );
         g.add_edge(test_file, test_fn, Edge::extracted(EdgeKind::Defines));
 
         let dead_nodes = find_dead_code(&g, 100);
-        let dead_names: Vec<_> = dead_nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
+        let dead_names: Vec<_> = dead_nodes
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
         assert!(!dead_names.contains(&"test_helper"));
     }
 
     #[test]
     fn find_dead_code_excludes_imported_nodes() {
         let mut g = Graph::new();
-        let lib = g.add_node(
-            Node::new(NodeKind::File, "file::src/lib.rs").with_source("src/lib.rs", 1, 100),
-        )
-;        let util = g.add_node(
+        let lib = g.add_node(Node::new(NodeKind::File, "file::src/lib.rs").with_source(
+            "src/lib.rs",
+            1,
+            100,
+        ));
+        let util = g.add_node(
             Node::new(NodeKind::Function, "pkg::util_helper").with_source("src/util.rs", 1, 10),
         );
-        let main = g.add_node(
-            Node::new(NodeKind::Function, "pkg::main").with_source("src/main.rs", 1, 5),
-        );
+        let main =
+            g.add_node(Node::new(NodeKind::Function, "pkg::main").with_source("src/main.rs", 1, 5));
         g.add_edge(lib, util, Edge::extracted(EdgeKind::Defines));
         g.add_edge(lib, main, Edge::extracted(EdgeKind::Defines));
         g.add_edge(main, util, Edge::extracted(EdgeKind::Imports)); // main imports util
 
         let dead_nodes = find_dead_code(&g, 100);
-        let dead_names: Vec<_> = dead_nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
+        let dead_names: Vec<_> = dead_nodes
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
         assert!(!dead_names.contains(&"util_helper"));
     }
 }

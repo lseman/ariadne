@@ -1,7 +1,7 @@
-use ariadne_graph::query::{temporal_diff, TemporalDiff, analyze_impact, ImpactQuery};
-use ariadne_graph::{Graph, NodeId, NodeKind};
-use ariadne_graph::store::Store;
 use anyhow::{bail, Result};
+use ariadne_graph::query::{analyze_impact, temporal_diff, ImpactQuery, TemporalDiff};
+use ariadne_graph::store::Store;
+use ariadne_graph::{Graph, NodeId, NodeKind};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -122,7 +122,13 @@ pub fn detect_changes_json(db: &Path, base: &str, max_depth: usize) -> Result<Va
 fn old_changed_diff(
     graph: &Graph,
     base: &str,
-) -> (Vec<String>, Vec<NodeId>, Vec<Value>, String, Option<TemporalDiff>) {
+) -> (
+    Vec<String>,
+    Vec<NodeId>,
+    Vec<Value>,
+    String,
+    Option<TemporalDiff>,
+) {
     let diff = git_changed_diff(base).unwrap_or_default();
     let changed_files: Vec<String> = diff.iter().map(|file| file.path.clone()).collect();
     let line_changed_nodes = nodes_for_changed_ranges(graph, &diff);
@@ -205,10 +211,7 @@ fn temporal_diff_json(graph: &Graph, diff: &TemporalDiff) -> Value {
     })
 }
 
-fn changed_edges_json(
-    graph: &Graph,
-    edges: &[ariadne_graph::query::ChangedEdge],
-) -> Vec<Value> {
+fn changed_edges_json(graph: &Graph, edges: &[ariadne_graph::query::ChangedEdge]) -> Vec<Value> {
     edges
         .iter()
         .map(|edge| {

@@ -1,10 +1,10 @@
+use anyhow::{bail, Result};
 use ariadne_graph::query::counterfactual::run_without_edges;
 use ariadne_graph::query::motifs::{
     diamond_inheritance_motif, doc_function_triangle, find_motifs, security_audit_motif,
 };
-use ariadne_graph::{Graph, NodeId};
 use ariadne_graph::store::Store;
-use anyhow::{bail, Result};
+use ariadne_graph::{Graph, NodeId};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::Path;

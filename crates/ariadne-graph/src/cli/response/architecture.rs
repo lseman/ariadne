@@ -149,15 +149,17 @@ fn architecture_warnings_json(
             })
         })
         .collect();
-    let mut low_cohesion: Vec<(&usize, usize, f32)> =
-        by_comm
-            .iter()
-            .filter_map(|(community, members)| {
-                let score = cohesion.get(community).copied().unwrap_or(1.0);
-                (members.len() > 1 && score < LOW_COHESION_THRESHOLD)
-                    .then_some((community, members.len(), score))
-            })
-            .collect();
+    let mut low_cohesion: Vec<(&usize, usize, f32)> = by_comm
+        .iter()
+        .filter_map(|(community, members)| {
+            let score = cohesion.get(community).copied().unwrap_or(1.0);
+            (members.len() > 1 && score < LOW_COHESION_THRESHOLD).then_some((
+                community,
+                members.len(),
+                score,
+            ))
+        })
+        .collect();
     low_cohesion.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
     for (community, size, score) in low_cohesion.into_iter().take(5) {
         warnings.push(json!({

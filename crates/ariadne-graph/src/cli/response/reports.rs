@@ -1,6 +1,6 @@
-use ariadne_graph::query::{leiden, pagerank, bridge_scores};
-use ariadne_graph::store::Store;
 use anyhow::Result;
+use ariadne_graph::query::{bridge_scores, leiden, pagerank};
+use ariadne_graph::store::Store;
 use std::collections::BTreeMap;
 use std::path::Path;
 

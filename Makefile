@@ -1,7 +1,7 @@
 # Makefile for the Ariadne workspace
 
 CARGO := cargo
-CRATE := ariadne-cli
+CRATE := ariadne-graph
 BINARY := target/release/ariadne
 
 .PHONY: all help build release test fmt fmt-check clippy doc clean install run run-debug self-demo
@@ -50,7 +50,7 @@ clean:
 	$(CARGO) clean
 
 install:
-	$(CARGO) install --path crates/ariadne-cli --force
+	$(CARGO) install --path crates/ariadne-graph --force
 
 run:
 	$(CARGO) run -p $(CRATE) -- $(filter-out $@,$(MAKECMDGOALS))

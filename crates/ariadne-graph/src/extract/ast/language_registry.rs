@@ -112,9 +112,7 @@ fn load_builtins() -> HashMap<String, LanguageDef> {
 }
 
 /// Names of languages that come from the bundled defaults.
-const BUILTIN_NAMES: &[&str] = &[
-    "rust", "python", "cpp", "typescript", "tsx", "javascript",
-];
+const BUILTIN_NAMES: &[&str] = &["rust", "python", "cpp", "typescript", "tsx", "javascript"];
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -158,11 +156,7 @@ impl LanguageRegistry {
                             MAX_CUSTOM_LANGUAGES,
                         );
                     }
-                    for (name, entry) in config
-                        .languages
-                        .into_iter()
-                        .take(MAX_CUSTOM_LANGUAGES)
-                    {
+                    for (name, entry) in config.languages.into_iter().take(MAX_CUSTOM_LANGUAGES) {
                         Self::merge_entry(&mut all, &name, entry);
                     }
                 } else {
@@ -208,7 +202,13 @@ impl LanguageRegistry {
                 tracing::warn!("custom language '{}' has empty grammar, skipping", name);
                 return;
             }
-            if entry.extensions.is_none() || entry.extensions.as_ref().map(|e| e.is_empty()).unwrap_or(true) {
+            if entry.extensions.is_none()
+                || entry
+                    .extensions
+                    .as_ref()
+                    .map(|e| e.is_empty())
+                    .unwrap_or(true)
+            {
                 tracing::warn!("custom language '{}' has no extensions, skipping", name);
                 return;
             }
@@ -291,7 +291,9 @@ mod tests {
         // Rust must have extensions and node types.
         let rust = defs.get("rust").unwrap();
         assert_eq!(rust.extensions, vec![".rs"]);
-        assert!(rust.function_node_types.contains(&"function_item".to_string()));
+        assert!(rust
+            .function_node_types
+            .contains(&"function_item".to_string()));
         assert!(rust.class_node_types.contains(&"struct_item".to_string()));
     }
 
@@ -317,7 +319,11 @@ mod tests {
         let defs = load_builtins();
         let cpp = defs.get("cpp").unwrap();
         for ext in &[".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"] {
-            assert!(cpp.matches_ext(Path::new(&format!("f{ext}"))), "missing {}", ext);
+            assert!(
+                cpp.matches_ext(Path::new(&format!("f{ext}"))),
+                "missing {}",
+                ext
+            );
         }
     }
 }

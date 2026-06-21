@@ -11,9 +11,7 @@ use std::path::Path;
 use tree_sitter::{Parser, Query, QueryCursor};
 
 // Re-export the registry for external use.
-pub use super::language_registry::{
-    get_language, get_language_by_path, registry, LanguageDef,
-};
+pub use super::language_registry::{get_language, get_language_by_path, registry, LanguageDef};
 
 /// Extract a single file for a known language definition.
 ///
@@ -33,16 +31,17 @@ pub fn extract_file(path: &Path, graph: &mut Graph, lang_def: &LanguageDef) -> R
 ///
 /// Builds tree-sitter queries from the node types defined in the language
 /// definition and extracts functions, classes, and imports.
-pub fn extract_custom_file(
-    path: &Path,
-    lang: &LanguageDef,
-    graph: &mut Graph,
-) -> Result<()> {
+pub fn extract_custom_file(path: &Path, lang: &LanguageDef, graph: &mut Graph) -> Result<()> {
     let source = std::fs::read_to_string(path)?;
     let mut parser = Parser::new();
 
-    let ts_lang = resolve_language(&lang.grammar)
-        .ok_or_else(|| anyhow::anyhow!("tree-sitter grammar '{}' not available for '{}'", lang.grammar, lang.name))?;
+    let ts_lang = resolve_language(&lang.grammar).ok_or_else(|| {
+        anyhow::anyhow!(
+            "tree-sitter grammar '{}' not available for '{}'",
+            lang.grammar,
+            lang.name
+        )
+    })?;
 
     parser
         .set_language(ts_lang)
@@ -55,19 +54,17 @@ pub fn extract_custom_file(
     let file_uri = path.to_string_lossy().to_string();
     let file_qn = format!("file::{}", file_uri);
     let file_is_test = crate::extract::test_detect::is_test_file_path(path);
-    let file_id = graph.add_node(
-        Node::new(NodeKind::File, &file_qn)
-            .with_source(file_uri.clone(), 0, source.lines().count() as u32)
-    );
+    let file_id = graph.add_node(Node::new(NodeKind::File, &file_qn).with_source(
+        file_uri.clone(),
+        0,
+        source.lines().count() as u32,
+    ));
 
     let mut cursor = QueryCursor::new();
 
     // --- function definitions ---
     for node_type in &lang.function_node_types {
-        let query_str = format!(
-            "({} name: (identifier) @name) @def",
-            node_type
-        );
+        let query_str = format!("({} name: (identifier) @name) @def", node_type);
         if let Ok(query) = Query::new(ts_lang, &query_str) {
             let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
             for m in matches {
@@ -86,8 +83,11 @@ pub fn extract_custom_file(
                 }
                 if let Some(n) = name {
                     let qn = format!("{}::{}", file_qn, n);
-                    let mut node = Node::new(NodeKind::Function, &qn)
-                        .with_source(file_uri.clone(), start, end);
+                    let mut node = Node::new(NodeKind::Function, &qn).with_source(
+                        file_uri.clone(),
+                        start,
+                        end,
+                    );
                     if file_is_test {
                         node = node.with_property("is_test", serde_json::Value::Bool(true));
                     }
@@ -101,15 +101,9 @@ pub fn extract_custom_file(
     // --- class/type definitions ---
     for node_type in &lang.class_node_types {
         // Try with (type_identifier) first, fall back to (identifier)
-        let query_str = format!(
-            "({} name: (type_identifier) @name) @def",
-            node_type
-        );
+        let query_str = format!("({} name: (type_identifier) @name) @def", node_type);
         let query = Query::new(ts_lang, &query_str).unwrap_or_else(|_| {
-            let fallback = format!(
-                "({} name: (identifier) @name) @def",
-                node_type
-            );
+            let fallback = format!("({} name: (identifier) @name) @def", node_type);
             Query::new(ts_lang, &fallback).expect("fallback query must compile")
         });
         let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
@@ -129,10 +123,11 @@ pub fn extract_custom_file(
             }
             if let Some(n) = name {
                 let qn = format!("{}::{}", file_qn, n);
-                let id = graph.add_node(
-                    Node::new(NodeKind::Class, &qn)
-                        .with_source(file_uri.clone(), start, end)
-                );
+                let id = graph.add_node(Node::new(NodeKind::Class, &qn).with_source(
+                    file_uri.clone(),
+                    start,
+                    end,
+                ));
                 graph.add_edge(file_id, id, Edge::extracted(EdgeKind::Defines));
             }
         }
@@ -171,7 +166,11 @@ pub fn extract_custom_file(
         }
         // If no query matched, emit a placeholder import node
         if !found {
-            tracing::debug!("no import query matched for '{}' in {}", node_type, lang.name);
+            tracing::debug!(
+                "no import query matched for '{}' in {}",
+                node_type,
+                lang.name
+            );
         }
     }
 
@@ -185,13 +184,17 @@ pub fn extract_custom_file(
                     let cn = &query.capture_names()[cap.index as usize];
                     if *cn == "callee" {
                         let name = cap.node.utf8_text(source.as_bytes()).unwrap_or("").trim();
-                        if !name.is_empty() && !crate::extract::should_suppress_call_placeholder(name) {
+                        if !name.is_empty()
+                            && !crate::extract::should_suppress_call_placeholder(name)
+                        {
                             let unresolved_qn = format!("unresolved::{}", name);
-                            let unresolved_id = graph.add_node(Node::new(
-                                NodeKind::Function,
-                                &unresolved_qn,
-                            ));
-                            graph.add_edge(file_id, unresolved_id, Edge::extracted(EdgeKind::Calls));
+                            let unresolved_id =
+                                graph.add_node(Node::new(NodeKind::Function, &unresolved_qn));
+                            graph.add_edge(
+                                file_id,
+                                unresolved_id,
+                                Edge::extracted(EdgeKind::Calls),
+                            );
                         }
                     }
                 }

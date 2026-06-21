@@ -12,47 +12,6 @@
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
-// ---------------------------------------------------------------------------
-// Intent categories mapped to Ariadne operations
-// ---------------------------------------------------------------------------
-
-const _INTENT_TOOLS: &[( &str, &[&str] )] = &[
-    (
-        "reviewing",
-        &[
-            "detect_changes",
-            "review_context",
-            "affected_flows",
-            "blast_radius",
-            "test_coverage",
-        ],
-    ),
-    (
-        "debugging",
-        &["search", "flows", "traverse", "paths"],
-    ),
-    (
-        "refactoring",
-        &["impact", "god_nodes", "large_functions", "gaps"],
-    ),
-    (
-        "exploring",
-        &[
-            "architecture_overview",
-            "community",
-            "list_communities",
-            "bridge_nodes",
-            "cycles",
-            "core",
-            "surprises",
-            "diagnostics",
-            "health",
-            "status",
-        ],
-    ),
-];
-
-// ---------------------------------------------------------------------------
 // Workflow adjacency: for each operation, what are useful next steps
 // ---------------------------------------------------------------------------
 
@@ -63,7 +22,10 @@ const _WORKFLOW: &[(&str, &[(&str, &str)])] = &[
         &[
             ("traverse", "Walk the call graph around a matched symbol"),
             ("impact", "Check the blast radius of a matched symbol"),
-            ("paths", "Find call paths between a matched symbol and another"),
+            (
+                "paths",
+                "Find call paths between a matched symbol and another",
+            ),
             ("flows", "See which execution flows contain the result"),
         ],
     ),
@@ -72,7 +34,10 @@ const _WORKFLOW: &[(&str, &[(&str, &str)])] = &[
         "traverse",
         &[
             ("search", "Semantic search across the graph"),
-            ("impact", "Check how much a traversed symbol affects the codebase"),
+            (
+                "impact",
+                "Check how much a traversed symbol affects the codebase",
+            ),
             ("flows", "See execution flows through traversed nodes"),
         ],
     ),
@@ -90,7 +55,10 @@ const _WORKFLOW: &[(&str, &[(&str, &str)])] = &[
         "flows",
         &[
             ("search", "Search for symbols in these flows"),
-            ("affected_flows", "Check which flows are affected by recent changes"),
+            (
+                "affected_flows",
+                "Check which flows are affected by recent changes",
+            ),
             ("impact", "Check the impact of nodes in a flow"),
         ],
     ),
@@ -99,7 +67,10 @@ const _WORKFLOW: &[(&str, &[(&str, &str)])] = &[
         "affected_flows",
         &[
             ("detect_changes", "Get risk-scored change analysis"),
-            ("review_context", "Build a review context with source snippets"),
+            (
+                "review_context",
+                "Build a review context with source snippets",
+            ),
             ("blast_radius", "Expand the impact analysis"),
         ],
     ),
@@ -108,7 +79,10 @@ const _WORKFLOW: &[(&str, &[(&str, &str)])] = &[
         "blast_radius",
         &[
             ("detect_changes", "Get risk-scored change analysis"),
-            ("review_context", "Build a review context with source snippets"),
+            (
+                "review_context",
+                "Build a review context with source snippets",
+            ),
             ("test_coverage", "Check which tests cover impacted nodes"),
         ],
     ),
@@ -116,7 +90,10 @@ const _WORKFLOW: &[(&str, &[(&str, &str)])] = &[
     (
         "detect_changes",
         &[
-            ("review_context", "Build a review context with source snippets"),
+            (
+                "review_context",
+                "Build a review context with source snippets",
+            ),
             ("affected_flows", "See which execution flows are affected"),
             ("blast_radius", "Expand the impact analysis"),
             ("test_coverage", "Check test coverage gaps in changed code"),
@@ -128,7 +105,10 @@ const _WORKFLOW: &[(&str, &[(&str, &str)])] = &[
         &[
             ("test_coverage", "Check test coverage gaps"),
             ("affected_flows", "See which flows are affected"),
-            ("suggested_questions", "Get AI-generated follow-up questions"),
+            (
+                "suggested_questions",
+                "Get AI-generated follow-up questions",
+            ),
         ],
     ),
     // impact → deeper analysis
@@ -192,7 +172,10 @@ const _WORKFLOW: &[(&str, &[(&str, &str)])] = &[
         "surprises",
         &[
             ("architecture_overview", "See the broader architecture"),
-            ("bridge_nodes", "Check bridge nodes around surprising connections"),
+            (
+                "bridge_nodes",
+                "Check bridge nodes around surprising connections",
+            ),
             ("impact", "Check the impact of surprising nodes"),
         ],
     ),
@@ -211,7 +194,10 @@ const _WORKFLOW: &[(&str, &[(&str, &str)])] = &[
         &[
             ("large_functions", "Find uncovered large functions"),
             ("impact", "Check the impact of uncovered nodes"),
-            ("detect_changes", "See what recently changed in tested areas"),
+            (
+                "detect_changes",
+                "See what recently changed in tested areas",
+            ),
         ],
     ),
     // report → related operations
@@ -228,7 +214,10 @@ const _WORKFLOW: &[(&str, &[(&str, &str)])] = &[
         "cycles",
         &[
             ("impact", "Check the impact of cyclic nodes"),
-            ("architecture_overview", "See how cycles affect the architecture"),
+            (
+                "architecture_overview",
+                "See how cycles affect the architecture",
+            ),
             ("bridge_nodes", "Check if cycles involve bridge nodes"),
         ],
     ),
@@ -265,7 +254,10 @@ const _WORKFLOW: &[(&str, &[(&str, &str)])] = &[
         &[
             ("detect_changes", "Get risk-scored change analysis"),
             ("review_context", "Build a review context"),
-            ("suggested_questions", "Get AI-generated follow-up questions"),
+            (
+                "suggested_questions",
+                "Get AI-generated follow-up questions",
+            ),
         ],
     ),
     // counterfactual → related operations
@@ -280,7 +272,10 @@ const _WORKFLOW: &[(&str, &[(&str, &str)])] = &[
     (
         "motifs",
         &[
-            ("architecture_overview", "See how motifs fit the architecture"),
+            (
+                "architecture_overview",
+                "See how motifs fit the architecture",
+            ),
             ("surprises", "Find surprising motif instances"),
         ],
     ),
@@ -348,42 +343,10 @@ impl Default for SessionState {
 }
 
 // ---------------------------------------------------------------------------
-// Intent inference
-// ---------------------------------------------------------------------------
-
-#[allow(dead_code)]
-fn infer_intent(tools_called: &[String]) -> &str {
-    if tools_called.is_empty() {
-        return "exploring";
-    }
-
-    let recent = &tools_called[tools_called.len().saturating_sub(10)..];
-    let mut scores: std::collections::HashMap<&str, i32> =
-        std::collections::HashMap::from([("reviewing", 0), ("debugging", 0), ("refactoring", 0), ("exploring", 0)]);
-    for tool in recent {
-        for (intent, _tools) in _INTENT_TOOLS {
-            if _tools.contains(&tool.as_str()) {
-                *scores.entry(*intent).or_default() += 1;
-            }
-        }
-    }
-
-    scores
-        .into_iter()
-        .max_by_key(|(_, score)| *score)
-        .map(|(intent, _)| intent)
-        .unwrap_or("exploring")
-}
-
-// ---------------------------------------------------------------------------
 // Hints generation
 // ---------------------------------------------------------------------------
 
-pub fn generate_hints(
-    tool_name: &str,
-    result: &Value,
-    session: &mut SessionState,
-) -> Value {
+pub fn generate_hints(tool_name: &str, result: &Value, session: &mut SessionState) -> Value {
     session.record_tool_call(tool_name);
 
     let next_steps = build_next_steps(tool_name, session);
@@ -412,7 +375,7 @@ pub fn generate_hints(
 
 fn build_next_steps(tool_name: &str, session: &SessionState) -> Vec<Value> {
     let called: HashSet<&str> = session.tools_called.iter().map(|t| t.as_str()).collect();
-    let candidates = _WORKFLOW.iter().filter(|(n, _)| *n == tool_name).next();
+    let candidates = _WORKFLOW.iter().find(|(n, _)| *n == tool_name);
     let suggestions: &[(&str, &str)] = match candidates {
         Some(&(_, s)) => s,
         None => return Vec::new(),
@@ -438,9 +401,12 @@ fn extract_warnings(result: &Value) -> Vec<String> {
 
     // Test gaps
     if let Some(Value::Array(gaps)) = result.get("test_gaps") {
-        let names: Vec<String> = gaps.iter().take(5).filter_map(|g| {
-            g.as_str().or_else(|| g.get("name").and_then(Value::as_str))
-        }).map(String::from).collect();
+        let names: Vec<String> = gaps
+            .iter()
+            .take(5)
+            .filter_map(|g| g.as_str().or_else(|| g.get("name").and_then(Value::as_str)))
+            .map(String::from)
+            .collect();
         if !names.is_empty() {
             warnings.push(format!("Test coverage gaps: {}", names.join(", ")));
         }
@@ -503,7 +469,13 @@ fn track_result(result: &Value, session: &mut SessionState) {
 
     // Nodes — look in common result shapes
     let mut qnames: Vec<&str> = Vec::new();
-    for key in &["results", "changed_nodes", "impacted_nodes", "nodes", "nodes_list"] {
+    for key in &[
+        "results",
+        "changed_nodes",
+        "impacted_nodes",
+        "nodes",
+        "nodes_list",
+    ] {
         if let Some(Value::Array(arr)) = result.get(key) {
             for item in arr {
                 if let Some(obj) = item.as_object() {

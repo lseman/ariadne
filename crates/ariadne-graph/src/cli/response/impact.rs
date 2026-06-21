@@ -1,5 +1,7 @@
 use anyhow::Result;
-use ariadne_graph::query::{analyze_impact, is_rank_noise, pagerank, personalized_pagerank, ImpactQuery};
+use ariadne_graph::query::{
+    analyze_impact, is_rank_noise, pagerank, personalized_pagerank, ImpactQuery,
+};
 use ariadne_graph::Graph;
 use serde_json::{json, Value};
 

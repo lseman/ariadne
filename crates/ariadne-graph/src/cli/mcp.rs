@@ -26,7 +26,6 @@ pub fn ariadne_mcp_tool_schema() -> Value {
 }
 
 /// MCP servers config.
-#[allow(dead_code)]
 pub fn mcp_servers_config(exe: &Path, db: &Path) -> Value {
     json!({
         "mcpServers": {
@@ -82,17 +81,6 @@ pub fn required_str<'a>(params: &'a Value, key: &str) -> anyhow::Result<&'a str>
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("missing string param '{}'", key))
-}
-
-/// MCP framing.
-#[allow(dead_code)]
-pub struct McpFraming;
-
-/// MCP message.
-#[allow(dead_code)]
-pub struct McpMessage {
-    pub content_length: usize,
-    pub body: String,
 }
 
 /// Read an MCP message from the reader.

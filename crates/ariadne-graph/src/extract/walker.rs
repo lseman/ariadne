@@ -84,7 +84,9 @@ pub fn extract_directory_with_custom(
             continue;
         }
         // Check custom languages first (they override built-in extension matching)
-        let lang_def = custom.values().find(|l| l.matches_ext(path))
+        let lang_def = custom
+            .values()
+            .find(|l| l.matches_ext(path))
             .or_else(|| registry.get_by_path(path));
         if let Some(lang_def) = lang_def {
             if let Err(e) = super::ast::custom_lang::extract_file(path, graph, lang_def) {

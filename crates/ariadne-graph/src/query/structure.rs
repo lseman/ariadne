@@ -168,7 +168,7 @@ pub fn hub_nodes(graph: &Graph, top_n: usize) -> Vec<HubNode> {
     let mut scored: Vec<_> = graph
         .nodes()
         .filter(|(_, n)| n.kind != crate::core::NodeKind::File)
-        .map(|(id, n)| {
+        .filter_map(|(id, n)| {
             let ind = in_degree.get(&id).copied().unwrap_or(0);
             let outd = out_degree.get(&id).copied().unwrap_or(0);
             let total = ind + outd;
@@ -187,7 +187,6 @@ pub fn hub_nodes(graph: &Graph, top_n: usize) -> Vec<HubNode> {
                 community_id: None,
             })
         })
-        .filter_map(|x| x)
         .collect();
     scored.sort_by_key(|h| std::cmp::Reverse(h.total_degree));
     scored.truncate(top_n);
