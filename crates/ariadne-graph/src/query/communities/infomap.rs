@@ -277,13 +277,55 @@ fn compute_community_flow(
     flow
 }
 
+/// Precompute per-community flow statistics for incremental LMDL delta.
+///
+/// Returns (community stats, incoming weights per community per node).
+///
+/// - `stats[c]` contains node_probability, exit_probability, h_p_sum for community c.
+/// - `incoming_to[u][c]` contains sum of w(v,u) for v in community c (raw weights).
+///
+/// O(E) total.
+fn precompute_incremental(
+    labels: &[usize],
+    working: &super::WorkingGraph,
+    two_m: f32,
+) -> (Vec<(f32, f32, f32)>, Vec<HashMap<usize, f32>>) {
+    let n = working.len();
+    let max_label = labels.iter().copied().max().unwrap_or(0);
+
+    // Community stats: (node_probability, exit_probability, h_p_sum)
+    let mut stats: Vec<(f32, f32, f32)> = vec![(0.0, 0.0, 0.0); max_label + 1];
+
+    // Node probabilities and h_p sums.
+    for (u, &l) in labels.iter().enumerate() {
+        let p = working.degree[u] / two_m;
+        let entry = &mut stats[l];
+        entry.0 += p; // node_probability
+        entry.2 += entropy_term(p); // h_p_sum
+    }
+
+    // Exit probabilities and incoming weights.
+    let mut incoming_to: Vec<HashMap<usize, f32>> = vec![HashMap::new(); n];
+    for v in 0..n {
+        let lv = labels[v];
+        for &(u, w) in &working.adj[v] {
+            // Track incoming weight to u from community lv
+            *incoming_to[u].entry(lv).or_insert(0.0) += w;
+            // If this edge crosses communities, add to exit probability
+            if labels[u] != lv {
+                let entry = &mut stats[lv];
+                entry.1 += w / two_m; // exit_probability
+            }
+        }
+    }
+
+    (stats, incoming_to)
+}
+
 /// Compute the LMDL delta for moving node `u` from community `old` to `new`.
 ///
+/// O(degree(u)) — only the two affected communities are re-evaluated.
 /// Returns negative if moving u improves the partition.
-///
-/// The delta is computed by evaluating the exact map equation before and
-/// after the candidate move. This keeps the local-move step aligned with
-/// the objective and avoids fragile incremental cut-flow bookkeeping.
 fn infomap_lmdl_delta(
     labels: &[usize],
     old: usize,
@@ -291,14 +333,72 @@ fn infomap_lmdl_delta(
     u: usize,
     working: &super::WorkingGraph,
     two_m: f32,
+    stats: &[(f32, f32, f32)], // (node_prob, exit_prob, h_p_sum)
+    incoming_to: &[HashMap<usize, f32>],
 ) -> f32 {
     if old == new {
         return f32::INFINITY;
     }
-    let before = compute_lmdl(working, labels, two_m);
-    let mut moved = labels.to_vec();
-    moved[u] = new;
-    compute_lmdl(working, &moved, two_m) - before
+
+    let (p_old, exit_old, _) = stats[old];
+    let (p_new, exit_new, _) = stats[new];
+    let p_u = working.degree[u] / two_m;
+
+    // Compute outgoing weights from u to old and new communities.
+    let mut w_out_old = 0.0f32; // sum of w(u,v)/2m for v in old
+    let mut w_out_new = 0.0f32; // sum of w(u,v)/2m for v in new
+    let mut w_out_other = 0.0f32; // sum of w(u,v)/2m for v in neither
+    for &(v, w) in &working.adj[u] {
+        let label_v = labels[v];
+        let w_m = w / two_m;
+        match (label_v == old, label_v == new) {
+            (true, _) => w_out_old += w_m,
+            (_, true) => w_out_new += w_m,
+            _ => w_out_other += w_m,
+        }
+    }
+
+    // Incoming weights from old/new communities to u.
+    let w_in_old = incoming_to[u].get(&old).copied().unwrap_or(0.0) / two_m;
+    let w_in_new = incoming_to[u].get(&new).copied().unwrap_or(0.0) / two_m;
+
+    // Exit probability deltas:
+    // old: loses outgoing to non-old, gains incoming from old to u
+    // delta_exit_old = w_in_old - (w_out_new + w_out_other)
+    let delta_exit_old = w_in_old - w_out_new - w_out_other;
+
+    // new: loses incoming from new to u, gains outgoing to non-new
+    // delta_exit_new = (w_out_old + w_out_other) - w_in_new
+    let delta_exit_new = w_out_old + w_out_other - w_in_new;
+
+    // q_total = sum of all exit probabilities.
+    // delta_q_total = delta_exit_old + delta_exit_new (only old/new change)
+    let delta_q_total = delta_exit_old + delta_exit_new;
+
+    // LMDL = H(q_total) - 2*sum_c H(exit_c) + sum_c H(p_c + exit_c) - sum_i H(p_i)
+    //
+    // h_p terms cancel: -H(p_u) from old + H(p_u) from new = 0.
+    // So we only need H(q_total) and the two affected communities.
+    //
+    // delta = H(q_total+delta) - H(q_total)
+    //       -2*[H(exit_old+de_old) - H(exit_old) + H(exit_new+de_new) - H(exit_new)]
+    //       +[H(p_old-p_u+exit_old+de_old) - H(p_old+exit_old)
+    //        + H(p_new+p_u+exit_new+de_new) - H(p_new+exit_new)]
+
+    let q_total = stats.iter().map(|s| s.1).sum::<f32>();
+    let q_total_after = q_total + delta_q_total;
+
+    let q_old_before = p_old + exit_old;
+    let q_old_after = (p_old - p_u) + (exit_old + delta_exit_old);
+
+    let q_new_before = p_new + exit_new;
+    let q_new_after = (p_new + p_u) + (exit_new + delta_exit_new);
+
+    entropy_term(q_total_after) - entropy_term(q_total)
+        - 2.0 * (entropy_term(exit_old + delta_exit_old) - entropy_term(exit_old))
+        - 2.0 * (entropy_term(exit_new + delta_exit_new) - entropy_term(exit_new))
+        + (entropy_term(q_old_after) - entropy_term(q_old_before))
+        + (entropy_term(q_new_after) - entropy_term(q_new_before))
 }
 
 /// LCG random number generator for deterministic walks.
@@ -332,6 +432,8 @@ fn infomap_local_move(
 
     for _ in 0..max_passes {
         let mut improved = false;
+        // Precompute community stats and incoming weights once per pass — O(E).
+        let (stats, incoming_to) = precompute_incremental(&current, working, two_m);
         for u in 0..n {
             let old = current[u];
             // Collect neighbor communities.
@@ -343,7 +445,16 @@ fn infomap_local_move(
                 if cand == old {
                     continue;
                 }
-                let delta = infomap_lmdl_delta(&current, old, cand, u, working, two_m);
+                let delta = infomap_lmdl_delta(
+                    &current,
+                    old,
+                    cand,
+                    u,
+                    working,
+                    two_m,
+                    &stats,
+                    &incoming_to,
+                );
                 if delta < best_delta {
                     best_delta = delta;
                     best_new = cand;
