@@ -516,12 +516,14 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "fold"
             | "from"
             | "get"
+            | "get_mut"
             | "index"
             | "insert"
             | "into"
             | "into_iter"
             | "is_empty"
             | "is_none"
+            | "is_some_and"
             | "iter_mut"
             | "join"
             | "last"
@@ -545,12 +547,115 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "to_owned"
             | "to_string"
             | "to_string_lossy"
+            | "from_str"
             | "trim"
             | "unwrap"
             | "unwrap_or"
             | "unwrap_or_default"
             | "unwrap_or_else"
             | "with_capacity"
+            // std::collections / std::vec methods
+            | "sort_by"
+            | "sort_by_key"
+            | "sort_unstable"
+            | "truncate"
+            | "reserve"
+            | "clear"
+            | "contains_key"
+            | "values"
+            | "concat"
+            | "to_vec"
+            // std::io / std::fs methods
+            | "read"
+            | "read_to_string"
+            | "read_to_end"
+            | "remove_dir_all"
+            | "remove_file"
+            | "create_dir_all"
+            | "exists"
+            | "write"
+            | "write_all"
+            | "flush"
+            // std trait methods that create noise
+            | "load"
+            | "display"
+            | "execute"
+            | "fg"
+            // std::env
+            | "temp_dir"
+            | "args"
+            // std::string methods
+            | "strip_prefix"
+            | "to_ascii_lowercase"
+            | "trim_matches"
+            // std::option
+            | "is_some"
+            | "or_else"
+            // std::collections
+            | "values_mut"
+            | "borrow"
+            // std::collections
+            | "has"
+            | "pop_front"
+            | "push_back"
+            | "remove"
+            | "to_lowercase"
+            | "to_uppercase"
+            | "split_whitespace"
+            | "saturating_sub"
+            | "replace"
+            | "to_string_pretty"
+            | "as_array"
+            | "as_u64"
+            | "add"
+            | "String"
+            // std::path
+            | "path"
+            | "file_name"
+            | "file_stem"
+            // std::num
+            | "wrapping_add"
+            // std::fs
+            | "current_dir"
+            // serde_json
+            | "as_bool"
+            | "as_f64"
+            | "as_object"
+            // tui-rs / external lib
+            | "render_widget"
+            | "highlight_style"
+            | "attr"
+            | "block"
+            | "border_style"
+            | "borders"
+            | "checkAvailable"
+            | "Percentage"
+            | "strip_suffix"
+            | "trim_end_matches"
+            | "pop"
+            | "chunks"
+            | "or_insert"
+            | "or_insert_with"
+            // SQLite rusqlite bindings
+            | "query_map"
+            | "prepare"
+            | "commit"
+            | "transaction"
+            | "select"
+            | "selected"
+            | "query_row"
+            | "add_modifier"
+            // std::time methods
+            | "duration_since"
+            | "now"
+            | "as_nanos"
+            // std::num
+            | "saturating_add"
+            | "wrapping_mul"
+            // std::path
+            | "extension"
+            // Confidence enum variant leaking as unresolved
+            | "inferred"
             // Common graph-library traversal/mutation helpers. Keeping
             // these out of the code graph prevents external petgraph calls
             // from masquerading as unresolved project calls.
@@ -572,6 +677,27 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "strlen"
             | "strcmp"
             | "std"
+            // tree-sitter Node API — the AST extractors walk these methods
+            // and emit call placeholders; they're not project functions.
+            | "child_by_field_name"
+            | "children"
+            | "end_position"
+            | "is_named"
+            | "kind"
+            | "language"
+            | "parent"
+            | "root_node"
+            | "node"
+            | "start_position"
+            | "text"
+            | "walk"
+            | "utf8_text"
+            // tree-sitter Query API
+            | "capture_names"
+            // tree-sitter Parser API
+            | "parse"
+            | "set_language"
+            | "included_ranges"
     )
 }
 
