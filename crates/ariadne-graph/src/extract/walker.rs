@@ -1,4 +1,4 @@
-use crate::core::{Edge, EdgeKind, Graph, NodeKind};
+use crate::core::{Edge, EdgeKind, Graph, GraphMut, NodeKind};
 use anyhow::Result;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -40,7 +40,7 @@ impl IgnoreSet {
 ///
 /// Returns the number of files processed. Skips hidden directories
 /// (`.git`, `.venv`, `target`, `node_modules`).
-pub fn extract_directory(root: &Path, graph: &mut Graph) -> Result<usize> {
+pub fn extract_directory(root: &Path, graph: &mut dyn GraphMut) -> Result<usize> {
     let ignore = IgnoreSet::load(root);
     let registry = super::ast::language_registry::registry();
 
@@ -88,7 +88,7 @@ pub fn extract_directory(root: &Path, graph: &mut Graph) -> Result<usize> {
 /// runtime (useful for tests that inject ad-hoc languages).
 pub fn extract_directory_with_custom(
     root: &Path,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     custom: &std::collections::HashMap<String, super::ast::language_registry::LanguageDef>,
 ) -> Result<usize> {
     let ignore = IgnoreSet::load(root);
@@ -138,7 +138,7 @@ pub fn ignore_set(root: &Path) -> IgnoreSet {
 
 /// Extract a single file — dispatches to the language-specific extractor
 /// based on file extension.
-pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
+pub fn extract_file(path: &Path, graph: &mut dyn GraphMut) -> Result<()> {
     let registry = super::ast::language_registry::registry();
     if let Some(lang_def) = registry.get_by_path(path) {
         return super::ast::custom_lang::extract_file(path, graph, lang_def);
@@ -153,7 +153,7 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
 /// Extract a single file with optional custom language support.
 pub fn extract_file_with_custom(
     path: &Path,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     custom: &std::collections::HashMap<String, super::ast::language_registry::LanguageDef>,
 ) -> Result<()> {
     // Check custom languages first (they override built-in)
@@ -241,7 +241,7 @@ fn module_stem(uri: &str) -> Option<String> {
     }
 }
 
-fn build_by_name(graph: &Graph) -> HashMap<String, Vec<crate::core::NodeId>> {
+fn build_by_name(graph: &dyn crate::core::GraphMut) -> HashMap<String, Vec<crate::core::NodeId>> {
     let mut by_name: HashMap<String, Vec<_>> = HashMap::new();
     for (id, node) in graph.nodes() {
         if matches!(
@@ -259,7 +259,7 @@ fn build_by_name(graph: &Graph) -> HashMap<String, Vec<crate::core::NodeId>> {
 // → {crate, auth}, `from pkg.auth import login` → {pkg, auth},
 // `import './auth'` → {auth}), used by Tier 4 to prefer candidates
 // whose module the caller's file actually imports.
-fn build_import_tokens(graph: &Graph) -> HashMap<String, HashSet<String>> {
+fn build_import_tokens(graph: &dyn crate::core::GraphMut) -> HashMap<String, HashSet<String>> {
     let mut import_tokens: HashMap<String, HashSet<String>> = HashMap::new();
     for (_, src, dst, edge) in graph.edges() {
         if edge.kind != EdgeKind::Imports {
@@ -286,7 +286,7 @@ fn build_import_tokens(graph: &Graph) -> HashMap<String, HashSet<String>> {
     import_tokens
 }
 
-pub fn resolve_call_placeholders(graph: &mut Graph) -> usize {
+pub fn resolve_call_placeholders(graph: &mut dyn GraphMut) -> usize {
     let by_name = build_by_name(graph);
     let import_tokens = build_import_tokens(graph);
 
@@ -708,7 +708,7 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
 /// Placeholder targets (qualified names starting with `call::`) are
 /// ignored — they're never real definitions. Idempotent: an existing
 /// `TestedBy` edge between the same pair is left alone.
-pub fn derive_tested_by_edges(graph: &mut Graph) -> usize {
+pub fn derive_tested_by_edges(graph: &mut dyn GraphMut) -> usize {
     fn is_test_node(node: &crate::core::Node) -> bool {
         node.properties
             .get("is_test")
@@ -775,13 +775,13 @@ mod tests {
     use super::*;
     use crate::core::{Node, NodeKind};
 
-    fn make_test_fn(graph: &mut Graph, qname: &str) -> crate::core::NodeId {
+    fn make_test_fn(graph: &mut dyn GraphMut, qname: &str) -> crate::core::NodeId {
         let node = Node::new(NodeKind::Function, qname)
             .with_property("is_test", serde_json::Value::Bool(true));
         graph.add_node(node)
     }
 
-    fn make_fn(graph: &mut Graph, qname: &str) -> crate::core::NodeId {
+    fn make_fn(graph: &mut dyn GraphMut, qname: &str) -> crate::core::NodeId {
         graph.add_node(Node::new(NodeKind::Function, qname))
     }
 

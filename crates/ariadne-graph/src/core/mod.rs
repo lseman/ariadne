@@ -11,6 +11,6 @@ pub mod id;
 pub mod node;
 
 pub use edge::{Confidence, Edge, EdgeKind};
-pub use graph::Graph;
+pub use graph::{Graph, GraphMut, GraphRead};
 pub use id::{EdgeId, NodeId};
 pub use node::{Node, NodeKind};

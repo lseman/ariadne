@@ -9,6 +9,7 @@
 pub mod db;
 mod embedding;
 mod query;
+#[cfg(test)]
 mod tests;
 
 #[doc(hidden)] // Re-export for embedding module.

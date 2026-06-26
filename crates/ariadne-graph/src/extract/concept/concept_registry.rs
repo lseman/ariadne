@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-type Extractor = fn(&std::path::Path, &mut crate::core::Graph) -> anyhow::Result<()>;
+type Extractor = fn(&std::path::Path, &mut dyn crate::core::GraphMut) -> anyhow::Result<()>;
 
 /// All concept extractors indexed by extension.
 const CONCEPT_EXTRACTORS: &[(&str, Extractor)] = &[
@@ -40,7 +40,7 @@ use super::markdown::extract_file as extract_markdown;
 /// Resolve mentions across all concept extractors.
 ///
 /// Idempotent: running multiple times adds no duplicate edges.
-pub fn resolve_all_mentions(graph: &mut crate::core::Graph) -> usize {
+pub fn resolve_all_mentions(graph: &mut dyn crate::core::GraphMut) -> usize {
     let added = super::markdown::resolve_mentions(graph);
     // HTML delegates to markdown's resolver, SVG has no mentions yet.
     added

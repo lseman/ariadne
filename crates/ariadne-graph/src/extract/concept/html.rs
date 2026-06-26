@@ -42,7 +42,7 @@
 //! HTML blocks without semantic structure fall back to paragraph-level
 //! Concept extraction.
 
-use crate::core::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
+use crate::core::{Edge, EdgeKind, GraphMut, Node, NodeId, NodeKind};
 use anyhow::Result;
 use html5ever::parse_document;
 use html5ever::tendril::TendrilSink;
@@ -52,7 +52,7 @@ use std::fs;
 use std::path::Path;
 
 /// Extract an HTML file from the graph.
-pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
+pub fn extract_file(path: &Path, graph: &mut dyn GraphMut) -> Result<()> {
     let source = fs::read_to_string(path)?;
     let file_uri = path.to_string_lossy().to_string();
     let file_qn = format!("doc::{}", file_uri);
@@ -93,7 +93,7 @@ fn extract_dom_tree(
     heading_counter: &mut u32,
     section_stack: &mut Vec<(NodeId, u32)>,
     current_section_id: &mut NodeId,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
 ) {
     for child in handle.children.borrow().iter() {
         match &child.data {
@@ -292,7 +292,7 @@ fn collect_text(handle: &Handle, out: &mut String, _only_inline: bool) {
 }
 
 /// Extract symbol references from a URL or link text.
-fn extract_symbol_from_url(url: &str, graph: &mut Graph, section_id: NodeId, _file_qn: &str) {
+fn extract_symbol_from_url(url: &str, graph: &mut dyn GraphMut, section_id: NodeId, _file_qn: &str) {
     // Handle fragment URLs like #authenticate — strip the leading #.
     let candidate = if let Some(stripped) = url.strip_prefix('#') {
         stripped
@@ -349,7 +349,7 @@ fn tokenize_code(code: &str) -> Vec<String> {
 /// If the symbol already exists in the graph it is linked immediately.
 /// Otherwise the token is stashed on the section node so
 /// [`resolve_mentions`] can link it in a post-pass.
-fn mention(graph: &mut Graph, section_id: NodeId, token: &str, confidence: f32) {
+fn mention(graph: &mut dyn GraphMut, section_id: NodeId, token: &str, confidence: f32) {
     if token.len() < 2 {
         return;
     }
@@ -376,7 +376,7 @@ fn mention(graph: &mut Graph, section_id: NodeId, token: &str, confidence: f32) 
 }
 
 /// Extract meta tags for page metadata (description, keywords, author).
-fn extract_meta(handle: &Handle, graph: &mut Graph, file_id: NodeId, _file_qn: &str) {
+fn extract_meta(handle: &Handle, graph: &mut dyn GraphMut, file_id: NodeId, _file_qn: &str) {
     let mut meta_stack: Vec<Handle> = vec![handle.clone()];
 
     while let Some(current) = meta_stack.pop() {
@@ -433,12 +433,12 @@ fn extract_meta(handle: &Handle, graph: &mut Graph, file_id: NodeId, _file_qn: &
 /// Resolve mentions that could not be linked at extraction time.
 ///
 /// Uses the same [`resolve_mentions`] post-pass as markdown extraction.
-pub fn resolve_mentions(graph: &mut Graph) -> usize {
+pub fn resolve_mentions(graph: &mut dyn GraphMut) -> usize {
     super::markdown::resolve_mentions(graph)
 }
 
 /// Resolve a symbol name to a graph node.
-fn resolve_symbol(graph: &Graph, token: &str) -> Option<NodeId> {
+fn resolve_symbol(graph: &dyn crate::core::GraphMut, token: &str) -> Option<NodeId> {
     if token.len() < 2 {
         return None;
     }
@@ -509,6 +509,7 @@ fn slugify(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Graph;
     use crate::core::{EdgeKind, Node, NodeKind};
 
     #[test]

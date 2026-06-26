@@ -5,7 +5,7 @@
 //! generic tree-sitter walker. Built-in languages use the registry
 //! definitions but keep their existing extractors.
 
-use crate::core::{Edge, EdgeKind, Graph, Node, NodeKind};
+use crate::core::{Edge, EdgeKind, Node, NodeKind};
 use anyhow::Result;
 use std::path::Path;
 use tree_sitter::{Parser, Query, QueryCursor};
@@ -17,7 +17,11 @@ pub use super::language_registry::{get_language, get_language_by_path, registry,
 ///
 /// For built-in languages (rust, python, cpp, typescript) the existing
 /// extractors are used. For custom languages a generic walker is employed.
-pub fn extract_file(path: &Path, graph: &mut Graph, lang_def: &LanguageDef) -> Result<()> {
+pub fn extract_file(
+    path: &Path,
+    graph: &mut dyn crate::core::GraphMut,
+    lang_def: &LanguageDef,
+) -> Result<()> {
     match lang_def.name.as_str() {
         "rust" => super::rust::extract_file(path, graph),
         "python" => super::python::extract_file(path, graph),
@@ -31,7 +35,11 @@ pub fn extract_file(path: &Path, graph: &mut Graph, lang_def: &LanguageDef) -> R
 ///
 /// Builds tree-sitter queries from the node types defined in the language
 /// definition and extracts functions, classes, and imports.
-pub fn extract_custom_file(path: &Path, lang: &LanguageDef, graph: &mut Graph) -> Result<()> {
+pub fn extract_custom_file(
+    path: &Path,
+    lang: &LanguageDef,
+    graph: &mut dyn crate::core::GraphMut,
+) -> Result<()> {
     let source = std::fs::read_to_string(path)?;
     let mut parser = Parser::new();
 

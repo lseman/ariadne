@@ -22,7 +22,7 @@
 //! - Images
 //! - HTML blocks (skipped for content extraction)
 
-use crate::core::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
+use crate::core::{Edge, EdgeKind, GraphMut, Node, NodeId, NodeKind};
 use anyhow::Result;
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ use std::fs;
 use std::path::Path;
 
 /// Extract a markdown file from the graph.
-pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
+pub fn extract_file(path: &Path, graph: &mut dyn GraphMut) -> Result<()> {
     let source = fs::read_to_string(path)?;
     let file_uri = path.to_string_lossy().to_string();
     let file_qn = format!("doc::{}", file_uri);
@@ -299,7 +299,7 @@ fn parse_optional_title(s: &str) -> Option<String> {
 }
 
 /// Extract symbol references from code block content.
-fn extract_symbols_from_code(code: &str, graph: &mut Graph, section_id: NodeId, _file_qn: &str) {
+fn extract_symbols_from_code(code: &str, graph: &mut dyn GraphMut, section_id: NodeId, _file_qn: &str) {
     // Split on word boundaries and try to resolve each token.
     for token in tokenize_code(code) {
         mention(graph, section_id, &token, 0.80);
@@ -307,7 +307,7 @@ fn extract_symbols_from_code(code: &str, graph: &mut Graph, section_id: NodeId, 
 }
 
 /// Extract symbol references from a URL or link text.
-fn extract_symbol_from_url(url: &str, graph: &mut Graph, section_id: NodeId, _file_qn: &str) {
+fn extract_symbol_from_url(url: &str, graph: &mut dyn GraphMut, section_id: NodeId, _file_qn: &str) {
     // Handle fragment URLs like #authenticate — strip the leading #.
     let candidate = if let Some(stripped) = url.strip_prefix('#') {
         stripped
@@ -366,7 +366,7 @@ fn tokenize_code(code: &str) -> Vec<String> {
 /// is stashed on the section node so [`resolve_mentions`] can link it in a
 /// post-pass once every file has been extracted — markdown is often walked
 /// before the code it references.
-fn mention(graph: &mut Graph, section_id: NodeId, token: &str, confidence: f32) {
+fn mention(graph: &mut dyn GraphMut, section_id: NodeId, token: &str, confidence: f32) {
     if token.len() < 2 {
         return;
     }
@@ -396,7 +396,7 @@ fn mention(graph: &mut Graph, section_id: NodeId, token: &str, confidence: f32) 
 /// their target symbol had not been extracted yet. Runs as a post-pass
 /// over the complete graph and clears the `pending_mentions` markers it
 /// consumes. Idempotent: never adds a duplicate `Mentions` edge.
-pub fn resolve_mentions(graph: &mut Graph) -> usize {
+pub fn resolve_mentions(graph: &mut dyn GraphMut) -> usize {
     let pending: Vec<(NodeId, Vec<(String, f32)>)> = graph
         .nodes()
         .filter_map(|(id, node)| {
@@ -446,12 +446,12 @@ pub fn resolve_mentions(graph: &mut Graph) -> usize {
 /// Resolve mentions across all concept extractors.
 ///
 /// Delegates to the markdown resolver (which HTML also uses). Idempotent.
-pub fn resolve_all_mentions(graph: &mut Graph) -> usize {
+pub fn resolve_all_mentions(graph: &mut dyn GraphMut) -> usize {
     resolve_mentions(graph)
 }
 
 /// Resolve a symbol name to a graph node.
-fn resolve_symbol(graph: &Graph, token: &str) -> Option<NodeId> {
+fn resolve_symbol(graph: &dyn crate::core::GraphMut, token: &str) -> Option<NodeId> {
     if token.len() < 2 {
         return None;
     }
@@ -535,6 +535,7 @@ fn slugify(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Graph;
     use crate::core::{EdgeKind, Node, NodeKind};
 
     #[test]

@@ -13,6 +13,7 @@ pub fn parse_confidence(conf_class: &str, confidence: f64) -> Confidence {
 }
 
 /// Convert a DB row into a `Node`.
+#[allow(clippy::too_many_arguments)]
 pub fn node_row_from_sql(
     kind_str: String,
     qname: String,

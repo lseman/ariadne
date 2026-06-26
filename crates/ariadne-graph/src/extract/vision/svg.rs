@@ -4,12 +4,12 @@
 //! node per non-empty `<text>` element it contains. Concept → symbol
 //! cross-linking is delegated to the resolver also used by markdown.
 
-use crate::core::{Edge, EdgeKind, Graph, Node, NodeKind};
+use crate::core::{Edge, EdgeKind, GraphMut, Node, NodeKind};
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
-pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
+pub fn extract_file(path: &Path, graph: &mut dyn GraphMut) -> Result<()> {
     let source = fs::read_to_string(path)?;
     let file_uri = path.to_string_lossy().to_string();
     let qn = format!("diagram::{}", file_uri);

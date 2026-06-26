@@ -22,7 +22,7 @@
 //! and old `MemberOf` / `EntryOf` edges into a re-detected flow are
 //! pruned before the new membership set is written.
 
-use crate::core::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
+use crate::core::{Edge, EdgeKind, Graph, GraphMut, Node, NodeId, NodeKind};
 use std::collections::{HashSet, VecDeque};
 
 /// Tunable limits for flow tracing.
@@ -52,11 +52,11 @@ impl Default for FlowOptions {
 
 /// Detect entry points, trace flows, and materialise them into the
 /// graph. Returns the number of flows produced.
-pub fn compute_flows(graph: &mut Graph) -> usize {
+pub fn compute_flows(graph: &mut dyn GraphMut) -> usize {
     compute_flows_with_options(graph, FlowOptions::default())
 }
 
-pub fn compute_flows_with_options(graph: &mut Graph, options: FlowOptions) -> usize {
+pub fn compute_flows_with_options(graph: &mut dyn GraphMut, options: FlowOptions) -> usize {
     let entries = detect_entry_points(graph);
     let mut produced = 0usize;
     for entry in entries {
@@ -127,7 +127,7 @@ pub fn compute_flows_with_options(graph: &mut Graph, options: FlowOptions) -> us
 }
 
 /// Lean entry-point detection.
-fn detect_entry_points(graph: &Graph) -> Vec<NodeId> {
+fn detect_entry_points(graph: &dyn crate::core::GraphMut) -> Vec<NodeId> {
     let mut entries = Vec::new();
     for (id, node) in graph.nodes() {
         if !matches!(node.kind, NodeKind::Function | NodeKind::Method) {
@@ -164,7 +164,11 @@ fn detect_entry_points(graph: &Graph) -> Vec<NodeId> {
 /// to the entry and more central within the flow survive; isolated leaf
 /// nodes at the fringe are dropped first. Ambiguous (placeholder) edges
 /// are skipped so external/unresolved calls don't pollute the flow.
-fn trace_flow(graph: &Graph, entry: NodeId, options: &FlowOptions) -> Vec<(NodeId, usize)> {
+fn trace_flow(
+    graph: &dyn crate::core::GraphMut,
+    entry: NodeId,
+    options: &FlowOptions,
+) -> Vec<(NodeId, usize)> {
     let safety_ceiling = options.max_nodes_per_flow.saturating_mul(10).max(500);
     let mut visited: HashSet<NodeId> = HashSet::new();
     let mut members: Vec<(NodeId, usize)> = Vec::new();
@@ -240,7 +244,7 @@ fn trace_flow(graph: &Graph, entry: NodeId, options: &FlowOptions) -> Vec<(NodeI
 /// Criticality score in `[0, 1]`. Higher = more important to know about
 /// if the flow's code changes.
 fn compute_criticality(
-    graph: &Graph,
+    graph: &dyn crate::core::GraphMut,
     members: &[(NodeId, usize)],
     entry_name: &str,
     is_test_entry: bool,
@@ -360,11 +364,11 @@ mod tests {
     use super::*;
     use crate::core::{Edge, EdgeKind, Node, NodeKind};
 
-    fn add_fn(graph: &mut Graph, qname: &str) -> NodeId {
+    fn add_fn(graph: &mut dyn GraphMut, qname: &str) -> NodeId {
         graph.add_node(Node::new(NodeKind::Function, qname))
     }
 
-    fn add_test_fn(graph: &mut Graph, qname: &str) -> NodeId {
+    fn add_test_fn(graph: &mut dyn GraphMut, qname: &str) -> NodeId {
         graph.add_node(
             Node::new(NodeKind::Function, qname)
                 .with_property("is_test", serde_json::Value::Bool(true)),

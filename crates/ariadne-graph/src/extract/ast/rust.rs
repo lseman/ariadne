@@ -14,14 +14,14 @@
 //! - `Imports` from file → module (one per `use` path)
 //! - `Implements` from impl → trait (best-effort)
 
-use crate::core::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
+use crate::core::{Edge, EdgeKind, GraphMut, Node, NodeId, NodeKind};
 use crate::extract::test_detect::{is_test_file_path, is_test_name};
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
 use tree_sitter::{Parser, Query, QueryCursor};
 
-pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
+pub fn extract_file(path: &Path, graph: &mut dyn GraphMut) -> Result<()> {
     let source = fs::read_to_string(path)?;
     let mut parser = Parser::new();
     parser
@@ -279,7 +279,7 @@ pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
     Ok(())
 }
 
-fn emit_calls_in_subtree(node: tree_sitter::Node, source: &str, graph: &mut Graph, caller: NodeId) {
+fn emit_calls_in_subtree(node: tree_sitter::Node, source: &str, graph: &mut dyn GraphMut, caller: NodeId) {
     let mut walker = node.walk();
     let mut to_visit: Vec<tree_sitter::Node> = node.children(&mut walker).collect();
     while let Some(n) = to_visit.pop() {
@@ -323,7 +323,7 @@ fn emit_calls_in_subtree(node: tree_sitter::Node, source: &str, graph: &mut Grap
 fn emit_macro_calls(
     macro_node: tree_sitter::Node,
     source: &str,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     caller: NodeId,
 ) {
     // Walk every descendant token_tree; for each, scan its direct
@@ -386,7 +386,7 @@ fn emit_macro_calls(
     }
 }
 
-fn add_ambiguous_call(graph: &mut Graph, caller: NodeId, name: &str, scope: Option<&str>) {
+fn add_ambiguous_call(graph: &mut dyn GraphMut, caller: NodeId, name: &str, scope: Option<&str>) {
     if crate::extract::should_suppress_call_placeholder(name) {
         return;
     }

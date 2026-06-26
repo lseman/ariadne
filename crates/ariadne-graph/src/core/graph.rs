@@ -1,4 +1,4 @@
-use crate::{Edge, EdgeId, Node, NodeId};
+use crate::{Edge, EdgeId, EdgeKind, Node, NodeId};
 use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use petgraph::Direction;
@@ -292,6 +292,174 @@ impl Graph {
             }
             self.inner.add_edge(si, di, edge.clone());
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trait abstractions for decoupling graph callers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Read-only graph operations.
+pub trait GraphRead {
+    fn find_by_qname(&self, qname: &str) -> Option<NodeId>;
+    fn nodes(&self) -> Box<dyn Iterator<Item = (NodeId, &Node)> + '_>;
+    fn edges(&self) -> Box<dyn Iterator<Item = (EdgeId, NodeId, NodeId, &Edge)> + '_>;
+    fn out_neighbors(&self, id: NodeId) -> Box<dyn Iterator<Item = (NodeId, &Edge)> + '_>;
+    fn in_neighbors(&self, id: NodeId) -> Box<dyn Iterator<Item = (NodeId, &Edge)> + '_>;
+    fn node_count(&self) -> usize;
+    fn edge_count(&self) -> usize;
+    fn has_edge_kind(&self, src: NodeId, dst: NodeId, kind: &EdgeKind) -> bool;
+}
+
+/// Mutable graph operations (includes read methods too).
+pub trait GraphMut {
+    // Mutation
+    fn add_node(&mut self, node: Node) -> NodeId;
+    fn add_edge(&mut self, src: NodeId, dst: NodeId, edge: Edge) -> EdgeId;
+    fn rename_node(&mut self, id: NodeId, new_qn: &str, new_name: &str) -> NodeId;
+    fn remove_node(&mut self, id: NodeId);
+    fn remove_nodes_by_id(&mut self, ids: &[NodeId]);
+    fn remove_edges_by_id(&mut self, ids: &[EdgeId]);
+    fn merge(&mut self, other: Graph);
+    fn edge_mut(&mut self, id: EdgeId) -> Option<&mut Edge>;
+    // Read (also available through GraphRead for &Graph)
+    fn node(&self, id: NodeId) -> Option<&Node>;
+    fn node_mut(&mut self, id: NodeId) -> Option<&mut Node>;
+    fn nodes(&self) -> Box<dyn Iterator<Item = (NodeId, &Node)> + '_>;
+    fn edges(&self) -> Box<dyn Iterator<Item = (EdgeId, NodeId, NodeId, &Edge)> + '_>;
+    fn out_neighbors(&self, id: NodeId) -> Box<dyn Iterator<Item = (NodeId, &Edge)> + '_>;
+    fn in_neighbors(&self, id: NodeId) -> Box<dyn Iterator<Item = (NodeId, &Edge)> + '_>;
+    fn node_count(&self) -> usize;
+    fn edge_count(&self) -> usize;
+    fn find_by_qname(&self, qname: &str) -> Option<NodeId>;
+}
+
+impl GraphRead for Graph {
+    fn find_by_qname(&self, qname: &str) -> Option<NodeId> {
+        self.by_qname.get(qname).map(|i| NodeId(i.index() as u32))
+    }
+
+    fn nodes(&self) -> Box<dyn Iterator<Item = (NodeId, &Node)> + '_> {
+        Box::new(
+            self.inner
+                .node_indices()
+                .map(|i| (NodeId(i.index() as u32), &self.inner[i])),
+        )
+    }
+
+    fn edges(&self) -> Box<dyn Iterator<Item = (EdgeId, NodeId, NodeId, &Edge)> + '_> {
+        Box::new(self.inner.edge_references().map(|e| {
+            (
+                EdgeId(e.id().index() as u32),
+                NodeId(e.source().index() as u32),
+                NodeId(e.target().index() as u32),
+                e.weight(),
+            )
+        }))
+    }
+
+    fn out_neighbors(&self, id: NodeId) -> Box<dyn Iterator<Item = (NodeId, &Edge)> + '_> {
+        let idx = NodeIndex::new(id.0 as usize);
+        Box::new(
+            self.inner
+                .edges_directed(idx, Direction::Outgoing)
+                .map(|e| (NodeId(e.target().index() as u32), e.weight())),
+        )
+    }
+
+    fn in_neighbors(&self, id: NodeId) -> Box<dyn Iterator<Item = (NodeId, &Edge)> + '_> {
+        let idx = NodeIndex::new(id.0 as usize);
+        Box::new(
+            self.inner
+                .edges_directed(idx, Direction::Incoming)
+                .map(|e| (NodeId(e.source().index() as u32), e.weight())),
+        )
+    }
+
+    fn node_count(&self) -> usize {
+        self.inner.node_count()
+    }
+
+    fn edge_count(&self) -> usize {
+        self.inner.edge_count()
+    }
+
+    fn has_edge_kind(&self, src: NodeId, dst: NodeId, kind: &EdgeKind) -> bool {
+        let s = NodeIndex::new(src.0 as usize);
+        let d = NodeIndex::new(dst.0 as usize);
+        self.inner
+            .edges_directed(s, Direction::Outgoing)
+            .any(|e| e.target() == d && e.weight().kind == *kind)
+    }
+}
+
+impl GraphMut for Graph {
+    fn add_node(&mut self, node: Node) -> NodeId {
+        self.add_node(node)
+    }
+
+    fn add_edge(&mut self, src: NodeId, dst: NodeId, edge: Edge) -> EdgeId {
+        self.add_edge(src, dst, edge)
+    }
+
+    fn rename_node(&mut self, id: NodeId, new_qn: &str, new_name: &str) -> NodeId {
+        self.rename_node(id, new_qn, new_name)
+    }
+
+    fn remove_node(&mut self, id: NodeId) {
+        self.remove_node(id);
+    }
+
+    fn remove_nodes_by_id(&mut self, ids: &[NodeId]) {
+        self.remove_nodes_by_id(ids);
+    }
+
+    fn remove_edges_by_id(&mut self, ids: &[EdgeId]) {
+        self.remove_edges_by_id(ids);
+    }
+
+    fn merge(&mut self, other: Graph) {
+        self.merge(other);
+    }
+
+    fn edge_mut(&mut self, id: EdgeId) -> Option<&mut Edge> {
+        self.edge_mut(id)
+    }
+
+    fn node(&self, id: NodeId) -> Option<&Node> {
+        self.node(id)
+    }
+
+    fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        self.node_mut(id)
+    }
+
+    fn nodes(&self) -> Box<dyn Iterator<Item = (NodeId, &Node)> + '_> {
+        GraphRead::nodes(self)
+    }
+
+    fn edges(&self) -> Box<dyn Iterator<Item = (EdgeId, NodeId, NodeId, &Edge)> + '_> {
+        GraphRead::edges(self)
+    }
+
+    fn out_neighbors(&self, id: NodeId) -> Box<dyn Iterator<Item = (NodeId, &Edge)> + '_> {
+        GraphRead::out_neighbors(self, id)
+    }
+
+    fn in_neighbors(&self, id: NodeId) -> Box<dyn Iterator<Item = (NodeId, &Edge)> + '_> {
+        GraphRead::in_neighbors(self, id)
+    }
+
+    fn node_count(&self) -> usize {
+        GraphRead::node_count(self)
+    }
+
+    fn edge_count(&self) -> usize {
+        GraphRead::edge_count(self)
+    }
+
+    fn find_by_qname(&self, qname: &str) -> Option<NodeId> {
+        GraphRead::find_by_qname(self, qname)
     }
 }
 

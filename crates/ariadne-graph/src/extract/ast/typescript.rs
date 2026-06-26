@@ -4,7 +4,7 @@
 //! and call edges from tree-sitter TypeScript parse trees. Plain JavaScript
 //! (.js/.mjs/.cjs) parses under the TypeScript grammar; .jsx uses the TSX grammar.
 
-use crate::core::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
+use crate::core::{Edge, EdgeKind, GraphMut, Node, NodeId, NodeKind};
 use crate::extract::should_suppress_call_placeholder;
 use crate::extract::test_detect::{is_test_file_path, is_test_name};
 use anyhow::Result;
@@ -12,7 +12,7 @@ use std::fs;
 use std::path::Path;
 use tree_sitter::Parser;
 
-pub fn extract_file(path: &Path, graph: &mut Graph) -> Result<()> {
+pub fn extract_file(path: &Path, graph: &mut dyn GraphMut) -> Result<()> {
     let source = fs::read_to_string(path)?;
     let mut parser = Parser::new();
     let lang = if path
@@ -61,7 +61,7 @@ struct TsContext<'a> {
 
 fn walk_scope(
     node: tree_sitter::Node,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     parent_id: NodeId,
     scope: Vec<String>,
     ctx: &TsContext<'_>,
@@ -203,7 +203,7 @@ fn walk_scope(
 /// Emit a declaration that may be wrapped in an `export` keyword.
 fn emit_exported_declaration(
     decl: &tree_sitter::Node,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     parent_id: NodeId,
     scope: &[String],
     ctx: &TsContext<'_>,
@@ -251,7 +251,7 @@ fn emit_exported_declaration(
 
 fn emit_class(
     node: tree_sitter::Node,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     parent_id: NodeId,
     scope: &[String],
     ctx: &TsContext<'_>,
@@ -273,7 +273,7 @@ fn emit_class(
 
 fn emit_interface(
     node: tree_sitter::Node,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     parent_id: NodeId,
     scope: &[String],
     ctx: &TsContext<'_>,
@@ -301,7 +301,7 @@ fn emit_interface(
 fn emit_type_alias(
     node: tree_sitter::Node,
     source: &str,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     file_uri: &str,
     file_qn: &str,
     parent_id: NodeId,
@@ -322,7 +322,7 @@ fn emit_type_alias(
 fn emit_enum(
     node: tree_sitter::Node,
     source: &str,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     file_uri: &str,
     file_qn: &str,
     parent_id: NodeId,
@@ -342,7 +342,7 @@ fn emit_enum(
 
 fn emit_fn(
     node: tree_sitter::Node,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     parent_id: NodeId,
     scope: &[String],
     ctx: &TsContext<'_>,
@@ -370,7 +370,7 @@ fn emit_fn(
 
 fn emit_var_functions(
     node: tree_sitter::Node,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     parent_id: NodeId,
     scope: &[String],
     ctx: &TsContext<'_>,
@@ -423,7 +423,7 @@ fn emit_var_functions(
 
 fn emit_method(
     node: tree_sitter::Node,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     parent_id: NodeId,
     scope: &[String],
     ctx: &TsContext<'_>,
@@ -451,7 +451,7 @@ fn emit_method(
 
 fn emit_namespace(
     node: tree_sitter::Node,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     parent_id: NodeId,
     scope: &[String],
     ctx: &TsContext<'_>,
@@ -475,7 +475,7 @@ fn emit_namespace(
 fn emit_import_statement(
     node: tree_sitter::Node,
     source: &str,
-    graph: &mut Graph,
+    graph: &mut dyn GraphMut,
     parent_id: NodeId,
 ) {
     if let Some(src) = node.child_by_field_name("source") {
@@ -546,7 +546,12 @@ fn emit_import_statement(
     }
 }
 
-fn emit_re_exports(node: tree_sitter::Node, source: &str, graph: &mut Graph, parent_id: NodeId) {
+fn emit_re_exports(
+    node: tree_sitter::Node,
+    source: &str,
+    graph: &mut dyn GraphMut,
+    parent_id: NodeId,
+) {
     if let Some(src) = node.child_by_field_name("source") {
         let module_name = text(src, source)
             .trim_matches('"')
@@ -562,7 +567,12 @@ fn emit_re_exports(node: tree_sitter::Node, source: &str, graph: &mut Graph, par
     }
 }
 
-fn emit_ts_bases(node: tree_sitter::Node, source: &str, graph: &mut Graph, class_id: NodeId) {
+fn emit_ts_bases(
+    node: tree_sitter::Node,
+    source: &str,
+    graph: &mut dyn GraphMut,
+    class_id: NodeId,
+) {
     let mut to_visit = children(node);
     while let Some(n) = to_visit.pop() {
         if matches!(n.kind(), "extends_clause") {
@@ -578,7 +588,7 @@ fn emit_ts_bases(node: tree_sitter::Node, source: &str, graph: &mut Graph, class
     }
 }
 
-fn emit_calls(node: tree_sitter::Node, source: &str, graph: &mut Graph, caller: NodeId) {
+fn emit_calls(node: tree_sitter::Node, source: &str, graph: &mut dyn GraphMut, caller: NodeId) {
     let mut to_visit = children(node);
     while let Some(n) = to_visit.pop() {
         if matches!(

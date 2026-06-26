@@ -7,6 +7,11 @@
 use crate::core::NodeId;
 use std::collections::{HashMap, HashSet};
 
+/// Per-community flow statistics: (node_probability, exit_probability, h_p_sum).
+type CommunityStats = (f32, f32, f32);
+/// Incoming-weight map: community → accumulated weight.
+type IncomingWeightMap = HashMap<usize, f32>;
+
 pub fn infomap(graph: &crate::Graph) -> HashMap<NodeId, usize> {
     infomap_with_options(graph, super::CommunityOptions::default())
 }
@@ -289,7 +294,7 @@ fn precompute_incremental(
     labels: &[usize],
     working: &super::WorkingGraph,
     two_m: f32,
-) -> (Vec<(f32, f32, f32)>, Vec<HashMap<usize, f32>>) {
+) -> (Vec<CommunityStats>, Vec<IncomingWeightMap>) {
     let n = working.len();
     let max_label = labels.iter().copied().max().unwrap_or(0);
 
@@ -326,6 +331,7 @@ fn precompute_incremental(
 ///
 /// O(degree(u)) — only the two affected communities are re-evaluated.
 /// Returns negative if moving u improves the partition.
+#[allow(clippy::too_many_arguments)]
 fn infomap_lmdl_delta(
     labels: &[usize],
     old: usize,
@@ -333,8 +339,8 @@ fn infomap_lmdl_delta(
     u: usize,
     working: &super::WorkingGraph,
     two_m: f32,
-    stats: &[(f32, f32, f32)], // (node_prob, exit_prob, h_p_sum)
-    incoming_to: &[HashMap<usize, f32>],
+    stats: &[CommunityStats],
+    incoming_to: &[IncomingWeightMap],
 ) -> f32 {
     if old == new {
         return f32::INFINITY;
@@ -394,7 +400,8 @@ fn infomap_lmdl_delta(
     let q_new_before = p_new + exit_new;
     let q_new_after = (p_new + p_u) + (exit_new + delta_exit_new);
 
-    entropy_term(q_total_after) - entropy_term(q_total)
+    entropy_term(q_total_after)
+        - entropy_term(q_total)
         - 2.0 * (entropy_term(exit_old + delta_exit_old) - entropy_term(exit_old))
         - 2.0 * (entropy_term(exit_new + delta_exit_new) - entropy_term(exit_new))
         + (entropy_term(q_old_after) - entropy_term(q_old_before))
@@ -598,11 +605,7 @@ fn infomap_refinement(
         members.iter().map(|u| refined[u]).collect()
     };
 
-    let per_parent_labels: Vec<Vec<usize>> = if options.parallel {
-        (0..parents.len()).into_iter().map(refine_parent).collect()
-    } else {
-        (0..parents.len()).map(refine_parent).collect()
-    };
+    let per_parent_labels: Vec<Vec<usize>> = (0..parents.len()).map(refine_parent).collect();
 
     // Assemble global refined vector.
     let mut refined: Vec<usize> = vec![total_labels; n];
