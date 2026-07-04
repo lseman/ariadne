@@ -64,7 +64,7 @@ fn graph_json(db: &Path, algorithm: &str, request_path: &str) -> anyhow::Result<
     use ariadne_graph::query::{infomap, leiden, louvain};
 
     let store = Store::open(db)?;
-    let graph = store.load()?;
+    let graph = super::response::load_cached(db, &store)?;
     let node_offset = query_usize(request_path, "offset").unwrap_or(0);
     let node_limit = query_usize(request_path, "limit")
         .unwrap_or(1000)
@@ -127,7 +127,7 @@ fn search_json(db: &Path, query: &str, request_path: &str) -> anyhow::Result<Str
     use ariadne_graph::query::ranked_search;
 
     let store = Store::open(db)?;
-    let graph = store.load()?;
+    let graph = super::response::load_cached(db, &store)?;
     let offset = query_usize(request_path, "offset").unwrap_or(0);
     let limit = query_usize(request_path, "limit")
         .unwrap_or(20)

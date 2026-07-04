@@ -17,7 +17,6 @@ const CONCEPT_EXTRACTORS: &[(&str, Extractor)] = &[
     ("markdown", extract_markdown),
     ("html", extract_html),
     ("htm", extract_html),
-    ("tex", extract_latex),
     ("svg", extract_svg),
 ];
 
@@ -31,10 +30,14 @@ pub fn get_by_path(path: &Path) -> Option<Extractor> {
         .map(|(_, f)| *f)
 }
 
+/// True when a concept extractor supports `path`.
+pub fn is_supported(path: &Path) -> bool {
+    get_by_path(path).is_some()
+}
+
 // Re-export for the registry entries.
 use super::super::vision::svg::extract_file as extract_svg;
 use super::html::extract_file as extract_html;
-use super::latex::extract_file as extract_latex;
 use super::markdown::extract_file as extract_markdown;
 
 /// Resolve mentions across all concept extractors.

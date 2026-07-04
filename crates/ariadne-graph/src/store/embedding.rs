@@ -5,16 +5,26 @@
 use super::db::DEFAULT_EMBEDDING_DIM;
 
 /// Build the text from which an embedding is computed for a node.
+///
+/// Includes metadata (kind, name, qualified_name) plus source_uri and
+/// source_text (function/class body). Source text provides the primary
+/// semantic signal for code-aware matching, complementing name-based
+/// FTS5 search with content-aware semantic understanding.
 pub fn embedding_source_text(
     kind: &str,
     name: &str,
     qualified_name: &str,
     source_uri: Option<&str>,
+    source_text: Option<&str>,
 ) -> String {
     let mut text = format!("{} {} {}", kind, name, qualified_name.replace("::", " "));
-    if let Some(source_uri) = source_uri {
+    if let Some(uri) = source_uri {
         text.push(' ');
-        text.push_str(source_uri);
+        text.push_str(uri);
+    }
+    if let Some(src) = source_text {
+        text.push('\n');
+        text.push_str(src);
     }
     text
 }
@@ -70,6 +80,13 @@ pub fn semantic_embedding(text: &str) -> Vec<f32> {
         .collect();
     if acronym.len() >= 2 {
         push_signed_hashed_feature(&mut vector, &format!("acro:{acronym}"), 0.85);
+    }
+
+    // Code-specific features: detect programming language patterns and
+    // boost features that capture structural similarity (same API shape,
+    // same control flow patterns, same type annotations).
+    if is_code_like(text) {
+        code_features(&unique_tokens, &mut vector);
     }
 
     for concept in semantic_concepts(&unique_tokens) {
@@ -228,6 +245,154 @@ fn semantic_concepts(tokens: &[String]) -> Vec<&'static str> {
         concepts.push("graph-reasoning");
     }
     concepts
+}
+
+/// Detect whether the text looks like code (has operators, keywords, or
+/// structural delimiters). This gates code-specific feature extraction.
+fn is_code_like(text: &str) -> bool {
+    let has_keyword = [
+        "fn",
+        "def",
+        "func",
+        "class",
+        "struct",
+        "impl",
+        "trait",
+        "interface",
+        "let",
+        "const",
+        "var",
+        "public",
+        "private",
+        "static",
+        "async",
+        "await",
+        "return",
+        "yield",
+        "for",
+        "while",
+        "if",
+        "else",
+        "match",
+        "switch",
+        "try",
+        "catch",
+        "throw",
+        "new",
+        "type",
+        "enum",
+        "union",
+        "import",
+        "export",
+        "from",
+        "package",
+        "module",
+        "fn",
+        "pub",
+        "self",
+        "this",
+    ];
+    let has_op = [
+        "->", "=>", "::", ":::", "||", "&&", "!=", "<=", ">=", "++", "--", "+=", "-=", "*=", "/=",
+    ];
+    let has_delim = ['{', '}', '[', ']', '(', ')', ';', ':', ',']
+        .iter()
+        .any(|c| text.contains(*c));
+
+    text.split_whitespace().any(|t| has_keyword.contains(&t))
+        || has_op.iter().any(|op| text.contains(*op))
+        || has_delim
+}
+
+/// Extract code-specific features that capture structural similarity:
+/// - API shape (fn name(args): return_type)
+/// - Type annotations
+/// - Control flow patterns
+/// - Access modifiers
+fn code_features(tokens: &[String], vector: &mut [f32]) {
+    let token_set: std::collections::HashSet<&str> = tokens.iter().map(|s| s.as_str()).collect();
+
+    // Access modifiers — classes/functions with same visibility often
+    // serve similar purposes in architecture.
+    for modifier in &["public", "private", "protected", "static", "pub", "const"] {
+        if token_set.contains(*modifier) {
+            push_signed_hashed_feature(vector, &format!("access:{modifier}"), 1.2);
+        }
+    }
+
+    // Type-related tokens — same return/parameter types indicate similar APIs
+    for type_kw in &[
+        "string", "int", "float", "bool", "boolean", "number", "vec", "vector", "list", "array",
+        "map", "dict", "option", "optional", "nullable", "any", "void", "null",
+    ] {
+        if token_set.contains(*type_kw) {
+            push_signed_hashed_feature(vector, &format!("type:{type_kw}"), 1.1);
+        }
+    }
+
+    // Async patterns
+    for async_kw in &["async", "await", "coroutine", "promise", "future", "defer"] {
+        if token_set.contains(*async_kw) {
+            push_signed_hashed_feature(vector, &format!("async:{async_kw}"), 1.5);
+        }
+    }
+
+    // Error handling patterns
+    if token_set.contains("error") || token_set.contains("exception") || token_set.contains("panic")
+    {
+        push_signed_hashed_feature(vector, "error-handling", 1.3);
+    }
+    if token_set.contains("try") || token_set.contains("catch") {
+        push_signed_hashed_feature(vector, "try-catch", 1.3);
+    }
+    if token_set.contains("result") || token_set.contains("ok") || token_set.contains("err") {
+        push_signed_hashed_feature(vector, "result-type", 1.3);
+    }
+
+    // Collection operations — functions that manipulate same collection
+    // types are structurally similar.
+    for coll_op in &[
+        "append", "insert", "push", "pop", "remove", "filter", "map", "reduce", "sort", "reverse",
+        "flatten", "merge", "join", "collect", "iter", "iterate", "find", "contains", "get", "set",
+        "delete", "clear", "size", "length",
+    ] {
+        if token_set.contains(coll_op) {
+            push_signed_hashed_feature(vector, &format!("coll:{coll_op}"), 1.0);
+        }
+    }
+
+    // I/O patterns
+    for io_kw in &[
+        "read",
+        "write",
+        "open",
+        "close",
+        "stream",
+        "buffer",
+        "file",
+        "path",
+        "url",
+        "http",
+        "tcp",
+        "socket",
+        "connect",
+        "disconnect",
+    ] {
+        if token_set.contains(*io_kw) {
+            push_signed_hashed_feature(vector, &format!("io:{io_kw}"), 1.0);
+        }
+    }
+
+    // Test patterns
+    for test_kw in &[
+        "test", "spec", "mock", "stub", "fixture", "setup", "teardown", "assert", "expect",
+        "should", "given", "when", "then",
+    ] {
+        if token_set.contains(*test_kw) {
+            push_signed_hashed_feature(vector, &format!("test-pat:{test_kw}"), 1.2);
+            break; // only add one test feature
+        }
+    }
 }
 
 fn char_ngrams(token: &str, min_n: usize, max_n: usize) -> Vec<String> {

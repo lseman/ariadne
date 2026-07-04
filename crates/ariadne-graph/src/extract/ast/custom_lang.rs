@@ -15,18 +15,18 @@ pub use super::language_registry::{get_language, get_language_by_path, registry,
 
 /// Extract a single file for a known language definition.
 ///
-/// For built-in languages (rust, python, cpp, typescript) the existing
-/// extractors are used. For custom languages a generic walker is employed.
+/// Specialized extractors are selected by the registry's TOML-backed
+/// `extractor` field. Languages without one use the generic walker.
 pub fn extract_file(
     path: &Path,
     graph: &mut dyn crate::core::GraphMut,
     lang_def: &LanguageDef,
 ) -> Result<()> {
-    match lang_def.name.as_str() {
-        "rust" => super::rust::extract_file(path, graph),
-        "python" => super::python::extract_file(path, graph),
-        "cpp" => super::cpp::extract_file(path, graph),
-        "typescript" | "tsx" | "javascript" => super::typescript::extract_file(path, graph),
+    match lang_def.extractor.as_str() {
+        "rust" => super::languages::rust::extract_file(path, graph),
+        "python" => super::languages::python::extract_file(path, graph),
+        "cpp" => super::languages::cpp::extract_file(path, graph),
+        "typescript" => super::languages::typescript::extract_file(path, graph),
         _ => extract_custom_file(path, lang_def, graph),
     }
 }
@@ -91,11 +91,11 @@ pub fn extract_custom_file(
                 }
                 if let Some(n) = name {
                     let qn = format!("{}::{}", file_qn, n);
-                    let mut node = Node::new(NodeKind::Function, &qn).with_source(
-                        file_uri.clone(),
-                        start,
-                        end,
-                    );
+                    let mut node = Node::new(NodeKind::Function, &qn)
+                        .with_source(file_uri.clone(), start, end)
+                        .with_source_text(
+                            super::extract_source_text(&source, start, end).unwrap_or_default(),
+                        );
                     if file_is_test {
                         node = node.with_property("is_test", serde_json::Value::Bool(true));
                     }
@@ -131,11 +131,13 @@ pub fn extract_custom_file(
             }
             if let Some(n) = name {
                 let qn = format!("{}::{}", file_qn, n);
-                let id = graph.add_node(Node::new(NodeKind::Class, &qn).with_source(
-                    file_uri.clone(),
-                    start,
-                    end,
-                ));
+                let id = graph.add_node(
+                    Node::new(NodeKind::Class, &qn)
+                        .with_source(file_uri.clone(), start, end)
+                        .with_source_text(
+                            super::extract_source_text(&source, start, end).unwrap_or_default(),
+                        ),
+                );
                 graph.add_edge(file_id, id, Edge::extracted(EdgeKind::Defines));
             }
         }
@@ -240,51 +242,4 @@ fn resolve_language(name: &str) -> Option<tree_sitter::Language> {
             None
         }
     }
-}
-
-/// Generate tree-sitter queries from a language definition's node types.
-///
-/// Returns a list of (query_string, capture_name) tuples that can be used
-/// to build [`Query`] objects at runtime.
-pub fn build_queries(lang_def: &LanguageDef) -> Vec<(String, String, String)> {
-    let mut queries = Vec::new();
-
-    // Function queries
-    for node_type in &lang_def.function_node_types {
-        queries.push((
-            format!("({} name: (identifier) @name) @def", node_type),
-            "function".into(),
-            node_type.into(),
-        ));
-    }
-
-    // Class queries (try type_identifier first, fallback to identifier)
-    for node_type in &lang_def.class_node_types {
-        queries.push((
-            format!("({} name: (type_identifier) @name) @def", node_type),
-            "class".into(),
-            node_type.into(),
-        ));
-        queries.push((
-            format!("({} name: (identifier) @name) @def", node_type),
-            "class".into(),
-            node_type.into(),
-        ));
-    }
-
-    // Import queries (try several common patterns)
-    for node_type in &lang_def.import_node_types {
-        queries.push((
-            format!("({} argument: (_) @path) @import", node_type),
-            "import".into(),
-            node_type.into(),
-        ));
-        queries.push((
-            format!("({} path: (_) @path) @import", node_type),
-            "import".into(),
-            node_type.into(),
-        ));
-    }
-
-    queries
 }

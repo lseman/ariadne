@@ -57,7 +57,6 @@ Ariadne is already useful as a local codebase map, an agent context server, and 
 | AST pass: JavaScript | working — .js/.mjs/.cjs via TS grammar, .jsx via TSX grammar |
 | AST pass: C/C++ | working — via tree-sitter-cpp |
 | Markdown concept extractor | minimal |
-| LaTeX concept extractor | stub |
 | SVG diagram extractor | working |
 | SQLite persistence | working |
 | FTS5 full-text search | working — BM25, unicode61+underscore tokeniser, blended ranking |
@@ -111,7 +110,7 @@ Python     .py
 TypeScript .ts .tsx
 JavaScript .js .jsx .mjs .cjs
 C / C++    .c .cc .cpp .cxx .h .hh .hpp .hxx
-Docs       .md .markdown (.tex stub)
+Docs       .md .markdown
 Diagrams   .svg
 ```
 

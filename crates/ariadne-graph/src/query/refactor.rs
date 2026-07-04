@@ -177,18 +177,6 @@ pub fn find_dead_code(graph: &Graph, limit: usize) -> Vec<Value> {
         "init", "setup", "new", "default",
     ];
 
-    // Collect framework base class suffixes (used in is_framework_inherited)
-    let _framework_suffixes = [
-        "Stack",
-        "Construct",
-        "Resource",
-        "Pipeline",
-        "Model",
-        "BaseModel",
-        "BaseSettings",
-        "DeclarativeBase",
-    ];
-
     // Build set of nodes that ARE called, imported, or referenced
     let mut called_nodes: HashSet<NodeId> = HashSet::new();
     let mut imported_nodes: HashSet<NodeId> = HashSet::new();
@@ -257,7 +245,7 @@ pub fn find_dead_code(graph: &Graph, limit: usize) -> Vec<Value> {
                 return false;
             }
             // Skip if it inherits from framework bases
-            if is_framework_inherited(n, &inherited_classes) {
+            if is_framework_inherited(*id, n, &inherited_classes) {
                 return false;
             }
             // Skip if it's in a test file
@@ -299,7 +287,15 @@ fn is_entry_point(node: &crate::core::Node, patterns: &[&str]) -> bool {
 }
 
 /// Check if a class inherits from framework base classes.
-fn is_framework_inherited(node: &crate::core::Node, _inherited_classes: &HashSet<NodeId>) -> bool {
+fn is_framework_inherited(
+    id: NodeId,
+    node: &crate::core::Node,
+    inherited_classes: &HashSet<NodeId>,
+) -> bool {
+    if inherited_classes.contains(&id) {
+        return true;
+    }
+
     // Check name suffixes (common for CDK/IaC constructs)
     let suffixes = [
         "Stack",
@@ -318,9 +314,6 @@ fn is_framework_inherited(node: &crate::core::Node, _inherited_classes: &HashSet
             return true;
         }
     }
-    // If this node is referenced via INHERITS/IMPLEMENTS edges, it's used
-    // (checked by caller via inherited_classes set)
-    _inherited_classes.contains(&NodeId(0)); // suppress unused
     false
 }
 

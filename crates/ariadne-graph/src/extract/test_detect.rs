@@ -35,12 +35,38 @@ pub fn is_test_file_path(path: &Path) -> bool {
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
-    // File-name conventions across languages.
-    name.starts_with("test_")               // Python: test_foo.py
-        || stem.ends_with("_test")          // Go/Rust: foo_test.go, foo_test.rs
-        || stem.ends_with("_spec")          // Ruby/RSpec convention
+    if name.starts_with("test_")            // Python/C/C++/Dart/Lua: test_foo.*
+        || stem.ends_with("_test")          // Go/Rust/Python/Dart/Lua: foo_test.*
+        || stem.ends_with("_spec")          // Ruby/Lua/RSpec convention
         || stem.ends_with(".test")          // JS/TS: foo.test.ts
-        || stem.ends_with(".spec") // JS/TS: foo.spec.ts
+        || stem.ends_with(".spec")
+    {
+        return true;
+    }
+
+    let stem_lower = stem.to_ascii_lowercase();
+    if stem_lower.starts_with("test_helper") || stem_lower.starts_with("test_helpers") {
+        return true;
+    }
+
+    // Suffix conventions from common xUnit/spec frameworks.
+    // Keep these extension-gated to avoid false positives like production
+    // `Contest` or `Latest` modules.
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    match ext {
+        "java" | "cs" | "php" => stem.ends_with("Test") || stem.ends_with("Tests"),
+        "kt" | "swift" => {
+            stem.ends_with("Test") || stem.ends_with("Tests") || stem.ends_with("Spec")
+        }
+        "scala" => stem.ends_with("Spec") || stem.ends_with("Suite") || stem.ends_with("Test"),
+        "dart" => stem_lower.starts_with("test_") || stem_lower.ends_with("_test"),
+        "lua" => {
+            stem_lower.starts_with("test_")
+                || stem_lower.ends_with("_test")
+                || stem_lower.ends_with("_spec")
+        }
+        _ => false,
+    }
 }
 
 /// Test the *symbol name*. True if the function/method name follows a
@@ -118,6 +144,19 @@ mod tests {
         assert!(is_test_file_path(&PathBuf::from("src/auth.test.ts")));
         assert!(is_test_file_path(&PathBuf::from("src/auth.spec.js")));
         assert!(is_test_file_path(&PathBuf::from("__tests__/auth.js")));
+    }
+
+    #[test]
+    fn detects_common_xunit_and_spec_files() {
+        assert!(is_test_file_path(&PathBuf::from("src/FooTest.java")));
+        assert!(is_test_file_path(&PathBuf::from("src/FooTests.kt")));
+        assert!(is_test_file_path(&PathBuf::from("src/FooSpec.swift")));
+        assert!(is_test_file_path(&PathBuf::from("src/FooSuite.scala")));
+        assert!(is_test_file_path(&PathBuf::from("src/FooTest.cs")));
+        assert!(is_test_file_path(&PathBuf::from("src/FooTest.php")));
+        assert!(is_test_file_path(&PathBuf::from("test_helpers.go")));
+        assert!(!is_test_file_path(&PathBuf::from("src/Contest.java")));
+        assert!(!is_test_file_path(&PathBuf::from("src/Latest.kt")));
     }
 
     #[test]

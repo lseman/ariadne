@@ -1,8 +1,9 @@
 # Built-in language definitions.
 #
-# This file is the single source of truth for all language metadata
-# (extensions, node types, grammar names).  The registry loads it at
-# startup and merges it with any user overlay at `.ariadne/languages.toml`.
+# This file is the single source of truth for language metadata:
+# extensions, grammar names, node types, and extractor dispatch. The registry
+# loads it at startup and merges it with any user overlay at
+# `.ariadne/languages.toml`.
 #
 # Users who want to add a new language or tweak an existing one should
 # create `.ariadne/languages.toml` — the overlay is merged on top of
@@ -10,6 +11,7 @@
 
 [languages.rust]
 grammar = "rust"
+extractor = "rust"
 extensions = [".rs"]
 function_node_types = [
     "function_item",
@@ -33,6 +35,7 @@ comment = "Rust"
 
 [languages.python]
 grammar = "python"
+extractor = "python"
 extensions = [".py"]
 function_node_types = [
     "function_definition",
@@ -52,6 +55,7 @@ comment = "Python"
 
 [languages.cpp]
 grammar = "cpp"
+extractor = "cpp"
 extensions = [
     ".c", ".cc", ".cpp", ".cxx",
     ".h", ".hh", ".hpp", ".hxx",
@@ -76,6 +80,7 @@ comment = "C/C++"
 
 [languages.typescript]
 grammar = "typescript"
+extractor = "typescript"
 extensions = [".ts"]
 function_node_types = [
     "function_declaration",
@@ -106,6 +111,7 @@ comment = "TypeScript"
 
 [languages.tsx]
 grammar = "tsx"
+extractor = "typescript"
 extensions = [".tsx", ".jsx"]
 function_node_types = [
     "function_declaration",
@@ -135,6 +141,7 @@ comment = "TSX/JSX"
 
 [languages.javascript]
 grammar = "javascript"
+extractor = "typescript"
 extensions = [".js", ".mjs", ".cjs"]
 function_node_types = [
     "function_declaration",

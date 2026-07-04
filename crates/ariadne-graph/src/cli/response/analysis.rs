@@ -177,7 +177,6 @@ fn language_of(node: &ariadne_graph::core::Node) -> Option<&'static str> {
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => "js",
         "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx" => "cpp",
         "md" | "markdown" => "markdown",
-        "tex" => "latex",
         "svg" => "diagram",
         _ => return None,
     })
@@ -185,7 +184,7 @@ fn language_of(node: &ariadne_graph::core::Node) -> Option<&'static str> {
 
 /// Languages that represent documentation rather than executable code.
 fn is_doc_language(lang: &str) -> bool {
-    matches!(lang, "markdown" | "latex" | "diagram")
+    matches!(lang, "markdown" | "diagram")
 }
 
 /// Rank "surprising" edges: those that cross a community boundary, cross a

@@ -7,27 +7,60 @@ use walkdir::WalkDir;
 
 #[derive(Debug, Clone)]
 pub struct IgnoreSet {
-    matcher: ignore::gitignore::Gitignore,
+    matchers: Vec<ignore::gitignore::Gitignore>,
 }
 
 impl IgnoreSet {
     pub fn load(root: &Path) -> Self {
-        let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
-        for ignore_file in [".gitignore", ".ariadneignore"] {
-            if let Some(err) = builder.add(root.join(ignore_file)) {
-                tracing::warn!("failed to load {}: {}", ignore_file, err);
+        let mut matchers = Vec::new();
+        for entry in WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|entry| {
+                entry.depth() == 0
+                    || !entry.file_type().is_dir()
+                    || !default_ignored_name(&entry.file_name().to_string_lossy())
+            })
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && matches!(
+                        entry.file_name().to_str(),
+                        Some(".gitignore" | ".ariadneignore")
+                    )
+            })
+        {
+            let base = entry.path().parent().unwrap_or(root);
+            let mut builder = ignore::gitignore::GitignoreBuilder::new(base);
+            if let Some(err) = builder.add(entry.path()) {
+                tracing::warn!("failed to read {}: {}", entry.path().display(), err);
+                continue;
+            }
+            match builder.build() {
+                Ok(matcher) => matchers.push(matcher),
+                Err(err) => {
+                    tracing::warn!("failed to load {}: {}", entry.path().display(), err);
+                }
             }
         }
-        let matcher = builder.build().unwrap_or_else(|err| {
-            tracing::warn!("failed to build ignore matcher: {}", err);
-            ignore::gitignore::Gitignore::empty()
-        });
-        Self { matcher }
+        Self { matchers }
     }
 
     pub fn is_ignored(&self, path: &Path) -> bool {
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        default_ignored_name(name) || self.matcher.matched(path, path.is_dir()).is_ignore()
+        if default_ignored_name(name) {
+            return true;
+        }
+
+        let mut ignored = false;
+        for matcher in &self.matchers {
+            let matched = matcher.matched(path, path.is_dir());
+            if matched.is_ignore() {
+                ignored = true;
+            } else if matched.is_whitelist() {
+                ignored = false;
+            }
+        }
+        ignored
     }
 }
 
@@ -76,56 +109,9 @@ pub fn extract_directory(root: &Path, graph: &mut dyn GraphMut) -> Result<usize>
 
     // Post-processing on the merged graph.
     resolve_call_placeholders(graph);
-    super::concept::resolve_all_mentions(graph);
-    derive_tested_by_edges(graph);
-    super::flows::compute_flows(graph);
-    Ok(count)
-}
-
-/// Same as `extract_directory` but with a custom language registry.
-///
-/// Custom language entries are merged on top of the global registry at
-/// runtime (useful for tests that inject ad-hoc languages).
-pub fn extract_directory_with_custom(
-    root: &Path,
-    graph: &mut dyn GraphMut,
-    custom: &std::collections::HashMap<String, super::ast::language_registry::LanguageDef>,
-) -> Result<usize> {
-    let ignore = IgnoreSet::load(root);
-    let registry = super::ast::language_registry::registry();
-
-    let files: Vec<_> = WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| !ignore.is_ignored(e.path()))
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_file())
-        .map(|e| e.path().to_path_buf())
-        .collect();
-
-    let count = files.len();
-
-    let per_file: Vec<_> = files
-        .par_iter()
-        .map(|path| {
-            let mut g = Graph::new();
-            let lang_def = custom
-                .values()
-                .find(|l| l.matches_ext(path))
-                .or_else(|| registry.get_by_path(path));
-            if let Some(lang_def) = lang_def {
-                let _ = super::ast::custom_lang::extract_file(path, &mut g, lang_def);
-            } else if let Some(extractor) = super::concept::concept_registry::get_by_path(path) {
-                let _ = extractor(path, &mut g);
-            }
-            g
-        })
-        .collect();
-
-    for g in per_file {
-        graph.merge(g);
-    }
-
-    resolve_call_placeholders(graph);
+    // Resolve TypeScript path aliases (e.g. @/ → src/) so IMPORTS_FROM
+    // edges point to real file nodes rather than bare alias strings.
+    super::ast::tsconfig_resolver::resolve_ts_path_aliases(graph, root);
     super::concept::resolve_all_mentions(graph);
     derive_tested_by_edges(graph);
     super::flows::compute_flows(graph);
@@ -150,74 +136,20 @@ pub fn extract_file(path: &Path, graph: &mut dyn GraphMut) -> Result<()> {
     Ok(())
 }
 
-/// Extract a single file with optional custom language support.
-pub fn extract_file_with_custom(
-    path: &Path,
-    graph: &mut dyn GraphMut,
-    custom: &std::collections::HashMap<String, super::ast::language_registry::LanguageDef>,
-) -> Result<()> {
-    // Check custom languages first (they override built-in)
-    if let Some(lang_def) = custom.values().find(|l| l.matches_ext(path)) {
-        return super::ast::custom_lang::extract_file(path, graph, lang_def);
-    }
-    let registry = super::ast::language_registry::registry();
-    if let Some(lang_def) = registry.get_by_path(path) {
-        return super::ast::custom_lang::extract_file(path, graph, lang_def);
-    }
-    // Concept (prose/diagram) extractor as fallback.
-    if let Some(extractor) = super::concept::concept_registry::get_by_path(path) {
-        return extractor(path, graph);
-    }
-    Ok(())
-}
-
-/// Built-in file extensions that are always supported, regardless of
-/// TOML config. Document languages (markdown, HTML, LaTeX) live
-/// outside the AST pass and use concept extractors. SVG uses the
-/// vision (diagram) extractor. All are listed here for relevance
-/// filtering.
+/// True when the path is handled by either the TOML-backed AST registry
+/// or the concept/diagram registry.
 pub fn is_supported(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|s| s.to_str()),
-        Some(
-            "rs" | "py"
-                | "ts"
-                | "tsx"
-                | "js"
-                | "jsx"
-                | "mjs"
-                | "cjs"
-                | "c"
-                | "cc"
-                | "cpp"
-                | "cxx"
-                | "h"
-                | "hh"
-                | "hpp"
-                | "hxx"
-                | "md"
-                | "markdown"
-                | "tex"
-                | "html"
-                | "htm"
-                | "svg"
-        )
-    )
-}
-
-/// Check if a path matches any custom language extension.
-pub fn is_custom_supported(
-    path: &Path,
-    custom: &std::collections::HashMap<String, super::ast::language_registry::LanguageDef>,
-) -> bool {
-    custom.values().any(|lang| lang.matches_ext(path))
+    super::ast::language_registry::registry()
+        .get_by_path(path)
+        .is_some()
+        || super::concept::concept_registry::is_supported(path)
 }
 
 /// True when a filesystem event on `path` could change the graph: the
 /// file is a supported source type, no component under `root` is a
 /// default-ignored directory, and the ignore set does not match.
 pub fn is_relevant_source(root: &Path, path: &Path, ignore: &IgnoreSet) -> bool {
-    if !is_supported(path) && !is_custom_supported(path, &Default::default()) {
+    if !is_supported(path) {
         return false;
     }
     let rel = path.strip_prefix(root).unwrap_or(path);
@@ -226,6 +158,16 @@ pub fn is_relevant_source(root: &Path, path: &Path, ignore: &IgnoreSet) -> bool 
         _ => false,
     });
     !ignored_component && !ignore.is_ignored(path)
+}
+
+/// Length of the common prefix shared by two qualified names, counted in
+/// `::` segments (not raw bytes) so a 3-segment common prefix always beats
+/// a 2-segment one regardless of string length.
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.split("::")
+        .zip(b.split("::"))
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
 /// The module name a source file answers to in import paths: its stem,
@@ -253,6 +195,148 @@ fn build_by_name(graph: &dyn crate::core::GraphMut) -> HashMap<String, Vec<crate
         }
     }
     by_name
+}
+
+/// Build a map from caller NodeId → impl type string.
+///
+/// For Method nodes (e.g. `Graph::add_node`), the impl type is extracted
+/// from the qualified name. When resolving `graph.add_node()`, we look up
+/// the caller's impl type — if caller is `Graph::some_method`, then
+/// `self.add_node()` → `Graph::add_node`.
+fn build_caller_impl_context(graph: &dyn crate::core::GraphMut) -> HashMap<crate::core::NodeId, String> {
+    let mut context: HashMap<crate::core::NodeId, String> = HashMap::new();
+
+    for (id, node) in graph.nodes() {
+        if matches!(node.kind, crate::core::NodeKind::Method) {
+            // Method qname: `file::./crates/ariadne-graph/src/core/graph.rs::Graph::add_node`
+            // Parts: ["file", "./crates/...", "graph.rs", "Graph", "add_node"]
+            // The impl type is the component right before the method name.
+            let qn = &node.qualified_name;
+            let parts: Vec<&str> = qn.split("::").collect();
+            if parts.len() >= 2 {
+                // Find the method name (last part), then the impl type is the
+                // last non-trivial part before it.
+                let _method_name = parts.last().unwrap();
+                let mut impl_type = None;
+                for part in parts.iter().rev().skip(1) {
+                    // Skip file path components: "file", empty, paths starting with "." or "/", .rs files
+                    if *part == "file" || part.is_empty() {
+                        continue;
+                    }
+                    if part.starts_with("./") || part.starts_with("/") || part.ends_with(".rs") {
+                        continue;
+                    }
+                    // The first non-trivial part before the method name is the impl type
+                    impl_type = Some(part.to_string());
+                    break;
+                }
+                if let Some(ty) = impl_type {
+                    context.insert(id, ty);
+                }
+            }
+        }
+    }
+
+    context
+}
+
+/// Scan source text for let-binding type annotations and constructor calls,
+/// returning the type of `var_name` if found.
+///
+/// Recognises:
+/// - `let var: TypeName` / `let mut var: TypeName`
+/// - `let var = TypeName::new(` / `let var = TypeName::`
+/// - `let var = TypeName {`  (struct literal)
+///
+/// Returns only the final type identifier (no generics, no path prefix).
+fn infer_type_from_let_bindings(source: &str, var_name: &str) -> Option<String> {
+    // Scan each `let` statement in the source for the variable name.
+    // Works on both multi-line and single-line (inline) function bodies.
+    //
+    // Recognises:
+    //   let [mut] var: Type ...
+    //   let [mut] var = Type::  (constructor / associated fn)
+    //   let [mut] var = Type {  (struct literal)
+    for let_pos in source.match_indices("let ").map(|(i, _)| i) {
+        let slice = &source[let_pos + 4..]; // skip "let "
+        let slice = slice.trim_start_matches("mut").trim_start();
+        // Must start with the variable name.
+        if !slice.starts_with(var_name) {
+            continue;
+        }
+        let after_name = slice[var_name.len()..].trim_start();
+        // Boundary check: next char must be `:`, `=`, ` `, or `;`.
+        let boundary = after_name
+            .chars()
+            .next()
+            .map(|c| matches!(c, ':' | '=' | ';' | ' ' | '\n' | '\r'))
+            .unwrap_or(false);
+        if !boundary {
+            continue;
+        }
+        // `let var: Type` — explicit annotation.
+        if let Some(type_part) = after_name.strip_prefix(':') {
+            let type_part = type_part.trim_start();
+            let ty: String = type_part
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !ty.is_empty() && ty.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                return Some(ty);
+            }
+        }
+        // `let var = …`
+        if let Some(rhs) = after_name.strip_prefix('=') {
+            let rhs = rhs.trim_start();
+            let rhs = rhs.trim_start_matches('&').trim_start_matches("mut").trim_start();
+            // `let var = Type::` — constructor or associated fn.
+            if let Some(idx) = rhs.find("::") {
+                let ty: String = rhs[..idx]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !ty.is_empty()
+                    && ty.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                {
+                    return Some(ty);
+                }
+            }
+            // `let var = Type {` — struct literal.
+            if let Some(idx) = rhs.find('{') {
+                let ty: String = rhs[..idx]
+                    .trim()
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !ty.is_empty()
+                    && ty.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                {
+                    return Some(ty);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Infer an impl type from a variable name.
+/// Maps common variable names to their likely types.
+fn infer_type_from_var_name(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    match lower.as_str() {
+        // Graph types
+        "graph" | "main_graph" | "app_graph" => Some("Graph".to_string()),
+        "g" => Some("Graph".to_string()),
+        "motif" | "mb" | "motif_builder" => Some("MotifBuilder".to_string()),
+        // Query types
+        "store" | "db" | "database" => Some("Store".to_string()),
+        "parser" | "ts_parser" => Some("Parser".to_string()),
+        // Other common types
+        "config" | "cfg" => Some("Config".to_string()),
+        "ctx" | "context" => Some("Context".to_string()),
+        "options" | "opts" => Some("Options".to_string()),
+        _ => None,
+    }
 }
 
 // Identifier tokens from each file's import paths (`use crate::auth;`
@@ -289,6 +373,10 @@ fn build_import_tokens(graph: &dyn crate::core::GraphMut) -> HashMap<String, Has
 pub fn resolve_call_placeholders(graph: &mut dyn GraphMut) -> usize {
     let by_name = build_by_name(graph);
     let import_tokens = build_import_tokens(graph);
+    // Build caller→impl_type map: for each function, determine which impl
+    // block it belongs to. If caller is `Graph::some_method`, then receivers
+    // in that function resolve to `Graph`. E.g. `self.add_node()` → `Graph::add_node`.
+    let caller_impl_context = build_caller_impl_context(graph);
 
     let existing: HashSet<_> = graph
         .edges()
@@ -360,6 +448,10 @@ pub fn resolve_call_placeholders(graph: &mut dyn GraphMut) -> usize {
         // scope onto the placeholder edge. Prefer the unique candidate
         // whose qualified name contains that scope. Inferred, not
         // structural — the match is by name fragment, not full resolution.
+        //
+        // Tier 3b: when multiple candidates match the scope, pick the one
+        // whose qualified name shares the longest common prefix with the
+        // caller's qualified name (same module subtree wins).
         if let Some(scope) = edge.properties.get("call_scope").and_then(|v| v.as_str()) {
             let scoped: Vec<_> = candidates
                 .iter()
@@ -377,6 +469,86 @@ pub fn resolve_call_placeholders(graph: &mut dyn GraphMut) -> usize {
                     additions.push((src, scoped[0], "scoped", false));
                 }
                 continue;
+            }
+            if scoped.len() > 1 {
+                let caller_qn = graph
+                    .node(src)
+                    .map(|n| n.qualified_name.as_str())
+                    .unwrap_or("");
+                let best = scoped
+                    .iter()
+                    .copied()
+                    .max_by_key(|&cand| {
+                        graph
+                            .node(cand)
+                            .map(|n| common_prefix_len(caller_qn, &n.qualified_name))
+                            .unwrap_or(0)
+                    });
+                if let Some(cand) = best {
+                    stale_edges.push(edge_id);
+                    if !existing.contains(&(src, cand)) {
+                        additions.push((src, cand, "scoped_prefix", false));
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Tier 3.5: receiver-based disambiguation. For method calls like
+        // `self.add_node()` or `graph.add_node()`, the Rust extractor captured
+        // `call_receiver` on the edge. We look up the caller's impl context:
+        //   - If caller is `Graph::some_method` and receiver is `self` → `Graph::add_node`
+        //   - If receiver name hints at a type (e.g. `graph` → `Graph`) → narrow by that type
+        //
+        // Tier 3.5+: for non-self receivers, try AST-derived let-binding scan
+        // before falling back to the hardcoded name map.
+        if let Some(receiver_name) = edge.properties.get("call_receiver").and_then(|v| v.as_str())
+        {
+            // Determine the impl type from the receiver and caller context.
+            let impl_type: Option<String> = if receiver_name == "self"
+                || receiver_name.starts_with("self.")
+            {
+                caller_impl_context.get(&src).cloned()
+            } else {
+                // First try AST-derived bindings from the caller's source file.
+                let ast_inferred = graph
+                    .node(src)
+                    .and_then(|n| n.source_uri.as_ref())
+                    .and_then(|uri| std::fs::read_to_string(uri).ok())
+                    .and_then(|src_text| {
+                        infer_type_from_let_bindings(&src_text, receiver_name)
+                    });
+                // Fall back to the heuristic name map.
+                ast_inferred.or_else(|| infer_type_from_var_name(receiver_name))
+            };
+
+            if let Some(impl_type) = impl_type {
+                // impl_type is like "Graph" or "MotifBuilder" — narrow candidates
+                // to those whose qualified name ends with `::ImplType::method`.
+                // We check that the impl type appears right before the method name
+                // (not just anywhere in the qualified name, which would match
+                // `GraphMut` when looking for `Graph`).
+                let receiver_candidates: Vec<_> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&cand| {
+                        graph
+                            .node(cand)
+                            .map(|n| {
+                                let qn = &n.qualified_name;
+                                qn.rsplit("::").skip(1).any(|part| part == impl_type)
+                            })
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                if receiver_candidates.len() == 1 {
+                    stale_edges.push(edge_id);
+                    let cand = receiver_candidates[0];
+                    if !existing.contains(&(src, cand)) {
+                        additions.push((src, cand, "receiver", false));
+                    }
+                    continue;
+                }
             }
         }
 
@@ -401,6 +573,73 @@ pub fn resolve_call_placeholders(graph: &mut dyn GraphMut) -> usize {
                     stale_edges.push(edge_id);
                     if !existing.contains(&(src, imported[0])) {
                         additions.push((src, imported[0], "import_scoped", false));
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Tier 5: same-directory affinity. When multiple candidates survive,
+        // prefer the one(s) whose source file lives in the same directory as
+        // the caller. Sibling modules in a crate commonly call each other.
+        if let Some(src_file) = src_file.as_ref() {
+            let src_dir = Path::new(src_file.as_str()).parent();
+            if let Some(src_dir) = src_dir {
+                let same_dir: Vec<_> = candidates
+                    .iter()
+                    .filter(|&&cand| {
+                        graph
+                            .node(cand)
+                            .and_then(|n| n.source_uri.as_deref())
+                            .map(|uri| {
+                                Path::new(uri)
+                                    .parent()
+                                    .map(|d| d == src_dir)
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false)
+                    })
+                    .copied()
+                    .collect();
+                if same_dir.len() == 1 {
+                    stale_edges.push(edge_id);
+                    if !existing.contains(&(src, same_dir[0])) {
+                        additions.push((src, same_dir[0], "same_dir", false));
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Tier 6: call-frequency prior. As a last-resort tiebreaker, prefer
+        // the candidate that already has the most resolved Calls in-edges.
+        // Only fires when the winner has ≥1 existing call — a tie at zero
+        // means no statistical signal and we leave the edge unresolved.
+        {
+            let scored: Vec<(crate::core::NodeId, usize)> = candidates
+                .iter()
+                .copied()
+                .map(|cand| {
+                    let in_calls = graph
+                        .in_neighbors(cand)
+                        .filter(|(_, edge)| edge.kind == EdgeKind::Calls)
+                        .count();
+                    (cand, in_calls)
+                })
+                .collect();
+            let max_score = scored.iter().map(|(_, s)| *s).max().unwrap_or(0);
+            if max_score > 0 {
+                // Unique winner at the highest score.
+                let winners: Vec<_> = scored
+                    .iter()
+                    .filter(|(_, s)| *s == max_score)
+                    .map(|(id, _)| *id)
+                    .collect();
+                if winners.len() == 1 {
+                    let cand = winners[0];
+                    stale_edges.push(edge_id);
+                    if !existing.contains(&(src, cand)) {
+                        additions.push((src, cand, "freq_prior", false));
                     }
                 }
             }
@@ -608,7 +847,7 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "as_array"
             | "as_u64"
             | "add"
-            | "String"
+            | "string"
             // std::path
             | "path"
             | "file_name"
@@ -629,7 +868,7 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "border_style"
             | "borders"
             | "checkAvailable"
-            | "Percentage"
+            | "percentage"
             | "strip_suffix"
             | "trim_end_matches"
             | "pop"
@@ -667,6 +906,13 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "node_indices"
             | "node_weight"
             | "node_weight_mut"
+            // std::fs::DirEntry / std::path methods
+            | "status"
+            | "watch"
+            | "to_path_buf"
+            | "is_dir"
+            | "is_file"
+            | "filter_entry"
             // C/C++ and libc-style calls.
             | "malloc"
             | "free"
@@ -685,6 +931,8 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "is_named"
             | "kind"
             | "language"
+            | "language_typescript"
+            | "language_tsx"
             | "parent"
             | "root_node"
             | "node"
@@ -692,12 +940,33 @@ pub fn should_suppress_call_placeholder(name: &str) -> bool {
             | "text"
             | "walk"
             | "utf8_text"
-            // tree-sitter Query API
-            | "capture_names"
             // tree-sitter Parser API
             | "parse"
             | "set_language"
             | "included_ranges"
+            // Additional tree-sitter / std methods that leak as unresolved
+            | "rev"
+            | "nth"
+            | "to_str"
+            | "last_mut"
+            | "trim_start"
+            | "from_utf8"
+            | "windows"
+            | "end_byte"
+            | "start_byte"
+            | "is_ascii_digit"
+            | "is_lowercase"
+            | "is_uppercase"
+            | "is_alphanumeric"
+            | "new_ext"
+            | "reverse"
+            | "next_back"
+            | "as_array_mut"
+            // Ariadne internal methods — not extractable as project functions
+            | "resolve_mentions"
+            | "original_nodes"
+            | "edges_mut"
+            | "qname_index"
     )
 }
 
@@ -775,6 +1044,28 @@ mod tests {
     use super::*;
     use crate::core::{Node, NodeKind};
 
+    #[test]
+    fn should_suppress_call_placeholder_works() {
+        // Ariadne internal methods
+        // Ariadne Graph API are NOT suppressed — they're real project functions
+        // that the placeholder resolver should resolve.
+        assert!(!should_suppress_call_placeholder("add_node"));
+        assert!(!should_suppress_call_placeholder("add_edge"));
+        assert!(!should_suppress_call_placeholder("nodes"));
+        assert!(!should_suppress_call_placeholder("edges"));
+        assert!(!should_suppress_call_placeholder("out_neighbors"));
+        assert!(!should_suppress_call_placeholder("in_neighbors"));
+        assert!(!should_suppress_call_placeholder("find_by_qname"));
+        // Rust std methods
+        assert!(should_suppress_call_placeholder("String"));
+        assert!(should_suppress_call_placeholder("rev"));
+        assert!(should_suppress_call_placeholder("nth"));
+        assert!(should_suppress_call_placeholder("windows"));
+        // Real project functions should NOT be suppressed
+        assert!(!should_suppress_call_placeholder("login"));
+        assert!(!should_suppress_call_placeholder("extract_file"));
+    }
+
     fn make_test_fn(graph: &mut dyn GraphMut, qname: &str) -> crate::core::NodeId {
         let node = Node::new(NodeKind::Function, qname)
             .with_property("is_test", serde_json::Value::Bool(true));
@@ -848,6 +1139,75 @@ mod tests {
                 .nodes()
                 .all(|(_, n)| !n.qualified_name.ends_with("::noisy")),
             ".ariadneignore entries should be excluded from extraction"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn extract_directory_honors_nested_ariadneignore() {
+        let dir = std::env::temp_dir().join(format!(
+            "ariadne_nested_ariadneignore_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("packages/app/src/generated")).unwrap();
+        std::fs::write(dir.join("packages/app/.ariadneignore"), "src/generated/\n").unwrap();
+        std::fs::write(dir.join("packages/app/src/lib.rs"), "pub fn kept() {}\n").unwrap();
+        std::fs::write(
+            dir.join("packages/app/src/generated/noisy.rs"),
+            "pub fn noisy() {}\n",
+        )
+        .unwrap();
+
+        let mut graph = Graph::new();
+        let count = extract_directory(&dir, &mut graph).unwrap();
+        assert_eq!(count, 1);
+        assert!(graph
+            .nodes()
+            .any(|(_, n)| n.qualified_name.ends_with("::kept")));
+        assert!(
+            graph
+                .nodes()
+                .all(|(_, n)| !n.qualified_name.ends_with("::noisy")),
+            "nested .ariadneignore entries should be excluded from extraction"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn nested_ariadneignore_can_reinclude_file_patterns() {
+        let dir = std::env::temp_dir().join(format!(
+            "ariadne_nested_reinclude_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("packages/app/src")).unwrap();
+        std::fs::write(dir.join(".ariadneignore"), "packages/app/src/*.rs\n").unwrap();
+        std::fs::write(dir.join("packages/app/.ariadneignore"), "!src/lib.rs\n").unwrap();
+        std::fs::write(dir.join("packages/app/src/lib.rs"), "pub fn kept() {}\n").unwrap();
+        std::fs::write(dir.join("packages/app/src/noisy.rs"), "pub fn noisy() {}\n").unwrap();
+
+        let mut graph = Graph::new();
+        let count = extract_directory(&dir, &mut graph).unwrap();
+        assert_eq!(count, 1);
+        assert!(graph
+            .nodes()
+            .any(|(_, n)| n.qualified_name.ends_with("::kept")));
+        assert!(
+            graph
+                .nodes()
+                .all(|(_, n)| !n.qualified_name.ends_with("::noisy")),
+            "nested .ariadneignore negations should reinclude matching files"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -1539,5 +1899,143 @@ pub fn entry() -> u32 { beta::shared() }
         assert!(g
             .out_neighbors(caller)
             .all(|(dst, edge)| dst != real_len || edge.kind != EdgeKind::Calls));
+    }
+
+    #[test]
+    fn common_prefix_len_counts_segments() {
+        assert_eq!(common_prefix_len("a::b::c", "a::b::d"), 2);
+        assert_eq!(common_prefix_len("a::b::c", "a::b::c"), 3);
+        assert_eq!(common_prefix_len("a::b", "x::y"), 0);
+        assert_eq!(common_prefix_len("", "a::b"), 0);
+    }
+
+    #[test]
+    fn infer_type_from_let_bindings_explicit_annotation() {
+        let src = "fn foo() { let calc: Calculator = Calculator::new(0.0); }";
+        assert_eq!(
+            infer_type_from_let_bindings(src, "calc"),
+            Some("Calculator".to_string())
+        );
+    }
+
+    #[test]
+    fn infer_type_from_let_bindings_constructor() {
+        let src = "fn foo() { let svc = UserService::new(); }";
+        assert_eq!(
+            infer_type_from_let_bindings(src, "svc"),
+            Some("UserService".to_string())
+        );
+    }
+
+    #[test]
+    fn infer_type_from_let_bindings_struct_literal() {
+        let src = "fn foo() { let cfg = Config { debug: true }; }";
+        assert_eq!(
+            infer_type_from_let_bindings(src, "cfg"),
+            Some("Config".to_string())
+        );
+    }
+
+    #[test]
+    fn infer_type_from_let_bindings_no_match() {
+        let src = "fn foo() { let x = 42; }";
+        assert_eq!(infer_type_from_let_bindings(src, "x"), None);
+    }
+
+    #[test]
+    fn tier3b_scoped_prefix_picks_closest_module() {
+        let mut g = Graph::new();
+        // Two functions named `helper` — both in "src" so Tier 3 can't
+        // disambiguate, but `a` shares the longer "src::utils" prefix with
+        // the caller, so Tier 3b should pick it.
+        let a = make_fn(&mut g, "file::src::utils::helper");
+        let _b = make_fn(&mut g, "file::src::core::helper");
+        let caller_node =
+            Node::new(NodeKind::Function, "file::src::utils::caller").with_source(
+                "src/utils/caller.rs".to_string(),
+                0,
+                10,
+            );
+        let caller = g.add_node(caller_node);
+        let ph = g.add_node(Node::new(NodeKind::Function, "call::helper"));
+        let mut call_edge = Edge::ambiguous(EdgeKind::Calls);
+        // scope "src" matches BOTH candidates → Tier 3 passes, Tier 3b fires.
+        call_edge
+            .properties
+            .insert("call_scope".into(), serde_json::json!("src"));
+        g.add_edge(caller, ph, call_edge);
+        let resolved = resolve_call_placeholders(&mut g);
+        assert_eq!(resolved, 1, "expected exactly 1 resolution via scoped_prefix");
+        let points_to_a = g
+            .out_neighbors(caller)
+            .any(|(dst, e)| dst == a && e.kind == EdgeKind::Calls);
+        assert!(points_to_a, "should resolve to src::utils::helper (closer prefix)");
+    }
+
+    #[test]
+    fn tier5_same_dir_affinity() {
+        let mut g = Graph::new();
+        // Two `process` functions: one in src/pipeline, one in src/io.
+        let pipeline_fn =
+            Node::new(NodeKind::Function, "file::src/pipeline/mod::process").with_source(
+                "src/pipeline/mod.rs".to_string(),
+                0,
+                5,
+            );
+        let io_fn =
+            Node::new(NodeKind::Function, "file::src/io/mod::process").with_source(
+                "src/io/mod.rs".to_string(),
+                0,
+                5,
+            );
+        let a = g.add_node(pipeline_fn);
+        let b = g.add_node(io_fn);
+        // Caller in src/pipeline/runner.rs — same dir as `a`.
+        let caller_node =
+            Node::new(NodeKind::Function, "file::src/pipeline/runner::run").with_source(
+                "src/pipeline/runner.rs".to_string(),
+                0,
+                10,
+            );
+        let caller = g.add_node(caller_node);
+        let ph = g.add_node(Node::new(NodeKind::Function, "call::process"));
+        g.add_edge(caller, ph, Edge::ambiguous(EdgeKind::Calls));
+        let resolved = resolve_call_placeholders(&mut g);
+        assert_eq!(resolved, 1, "Tier 5 same-dir should resolve to 1");
+        let points_to_a = g
+            .out_neighbors(caller)
+            .any(|(dst, e)| dst == a && e.kind == EdgeKind::Calls);
+        assert!(points_to_a, "should resolve to pipeline/mod::process");
+        let points_to_b = g
+            .out_neighbors(caller)
+            .any(|(dst, e)| dst == b && e.kind == EdgeKind::Calls);
+        assert!(!points_to_b, "should NOT resolve to io/mod::process");
+    }
+
+    #[test]
+    fn tier6_freq_prior_picks_most_called() {
+        let mut g = Graph::new();
+        // Two `render` functions; `b` has more in-edges.
+        let a = make_fn(&mut g, "file::src/a::render");
+        let b = make_fn(&mut g, "file::src/b::render");
+        // Give `b` two existing resolved callers.
+        let caller1 = make_fn(&mut g, "file::src/x::caller1");
+        let caller2 = make_fn(&mut g, "file::src/x::caller2");
+        g.add_edge(caller1, b, Edge::extracted(EdgeKind::Calls));
+        g.add_edge(caller2, b, Edge::extracted(EdgeKind::Calls));
+        // New caller calls ambiguous `render`.
+        let new_caller = make_fn(&mut g, "file::src/y::new_caller");
+        let ph = g.add_node(Node::new(NodeKind::Function, "call::render"));
+        g.add_edge(new_caller, ph, Edge::ambiguous(EdgeKind::Calls));
+        let resolved = resolve_call_placeholders(&mut g);
+        assert_eq!(resolved, 1, "Tier 6 freq_prior should resolve");
+        let points_to_b = g
+            .out_neighbors(new_caller)
+            .any(|(dst, e)| dst == b && e.kind == EdgeKind::Calls);
+        assert!(points_to_b, "should pick b (more in-edges)");
+        let points_to_a = g
+            .out_neighbors(new_caller)
+            .any(|(dst, e)| dst == a && e.kind == EdgeKind::Calls);
+        assert!(!points_to_a, "should NOT pick a (fewer in-edges)");
     }
 }

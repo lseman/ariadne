@@ -26,7 +26,7 @@ pub fn cmd_mcp(db: &Path) -> Result<()> {
         let request: serde_json::Value = serde_json::from_str(&line)?;
         let operation = required_str(&request, "operation")?;
         let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-        match super::response::tool_response(db, operation, &params) {
+        match super::response::tool_response_cached(db, operation, &params) {
             Ok(response) => println!("{}", serde_json::to_string_pretty(&response)?),
             Err(e) => println!(
                 "{}",
@@ -88,7 +88,7 @@ pub fn cmd_mcp_server(db: &Path) -> Result<()> {
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("status");
                     let tool_params = args.get("params").cloned().unwrap_or_else(|| json!({}));
-                    match super::response::tool_response(db, operation, &tool_params) {
+                    match super::response::tool_response_cached(db, operation, &tool_params) {
                         Ok(result) => json!({
                             "jsonrpc": "2.0",
                             "id": id,

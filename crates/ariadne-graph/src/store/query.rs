@@ -23,6 +23,7 @@ pub fn node_row_from_sql(
     properties: String,
     valid_from: Option<String>,
     valid_to: Option<String>,
+    source_text: Option<String>,
 ) -> Node {
     let kind: NodeKind =
         serde_json::from_value(serde_json::Value::String(kind_str)).unwrap_or(NodeKind::Function);
@@ -33,6 +34,7 @@ pub fn node_row_from_sql(
     node.properties = serde_json::from_str(&properties).unwrap_or_default();
     node.valid_from = valid_from;
     node.valid_to = valid_to;
+    node.source_text = source_text;
     node
 }
 

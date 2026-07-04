@@ -1,5 +1,6 @@
 mod analysis;
 mod architecture;
+mod cache;
 mod context;
 mod flows;
 mod hints;
@@ -22,6 +23,7 @@ pub use analysis::{
     large_functions_json, surprises_json,
 };
 pub use architecture::architecture_overview_json;
+pub use cache::load_cached;
 pub use context::minimal_context_json;
 pub use flows::{handle_affected_flows, handle_blast_radius, handle_flows, handle_test_coverage};
 pub use hints::SessionState;
@@ -36,11 +38,19 @@ pub use temporal::{detect_changes_json, graph_diff_json};
 
 pub type ResponseSession = std::sync::RwLock<hints::SessionState>;
 
-/// One-operation JSON interface for agents and MCP wrappers.
+/// One-operation JSON interface for agents and MCP wrappers (no cache, always reloads).
 pub fn tool_response(db: &Path, operation: &str, params: &Value) -> Result<Value> {
     let session = Session();
     let mut guard = session.write().unwrap();
-    let response = _tool_response(db, operation, params, &mut guard)?;
+    let response = _tool_response(db, operation, params, &mut guard, false)?;
+    Ok(response)
+}
+
+/// Cached JSON interface for long-lived processes (mcp-server, serve).
+pub fn tool_response_cached(db: &Path, operation: &str, params: &Value) -> Result<Value> {
+    let session = Session();
+    let mut guard = session.write().unwrap();
+    let response = _tool_response(db, operation, params, &mut guard, true)?;
     Ok(response)
 }
 
@@ -50,9 +60,14 @@ fn _tool_response(
     operation: &str,
     params: &Value,
     session: &mut RwLockWriteGuard<hints::SessionState>,
+    use_cache: bool,
 ) -> Result<Value> {
     let store = ariadne_graph::store::Store::open(db)?;
-    let graph = store.load()?;
+    let graph = if use_cache {
+        cache::load_cached(db, &store)?
+    } else {
+        store.load()?
+    };
     let detail = DetailLevel::from_params(params);
     let response = match operation {
         "minimal_context" | "context" => {

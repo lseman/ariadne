@@ -84,6 +84,10 @@ pub struct Node {
     pub valid_from: Option<String>,
     /// Last commit SHA in which this node is valid. `None` for "still valid".
     pub valid_to: Option<String>,
+    /// Source code content for this node (function body, class body, etc.).
+    /// Used for semantic embeddings. Truncated to 10KB.
+    #[serde(default)]
+    pub source_text: Option<String>,
 }
 
 impl Node {
@@ -100,6 +104,7 @@ impl Node {
             properties: BTreeMap::new(),
             valid_from: None,
             valid_to: None,
+            source_text: None,
         }
     }
 
@@ -107,6 +112,17 @@ impl Node {
         self.source_uri = Some(uri.into());
         self.line_start = Some(line_start);
         self.line_end = Some(line_end);
+        self
+    }
+
+    /// Attach source code text for this node. Truncated to 10KB.
+    pub fn with_source_text(mut self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        self.source_text = Some(if text.len() > 10_000 {
+            text[..10_000].to_string()
+        } else {
+            text
+        });
         self
     }
 

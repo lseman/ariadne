@@ -156,22 +156,44 @@ fn walk_scope(
                 if let Some(name_node) = child.child_by_field_name("name") {
                     let nm = text(name_node, ctx.source);
                     let qn = scoped_qname(ctx.file_qn, &scope, &nm);
-                    graph.add_node(Node::new(NodeKind::Type, qn).with_source(
-                        ctx.file_uri.to_string(),
-                        child.start_position().row as u32,
-                        child.end_position().row as u32,
-                    ));
+                    graph.add_node(
+                        Node::new(NodeKind::Type, qn)
+                            .with_source(
+                                ctx.file_uri.to_string(),
+                                child.start_position().row as u32,
+                                child.end_position().row as u32,
+                            )
+                            .with_source_text(
+                                super::super::extract_source_text(
+                                    ctx.source,
+                                    child.start_position().row as u32,
+                                    child.end_position().row as u32,
+                                )
+                                .unwrap_or_default(),
+                            ),
+                    );
                 }
             }
             "function_expression" => {
                 if let Some(name) = child.child_by_field_name("name") {
                     let nm = text(name, ctx.source);
                     let qn = scoped_qname(ctx.file_qn, &scope, &nm);
-                    let fn_id = graph.add_node(Node::new(NodeKind::Function, &qn).with_source(
-                        ctx.file_uri.to_string(),
-                        child.start_position().row as u32,
-                        child.end_position().row as u32,
-                    ));
+                    let fn_id = graph.add_node(
+                        Node::new(NodeKind::Function, &qn)
+                            .with_source(
+                                ctx.file_uri.to_string(),
+                                child.start_position().row as u32,
+                                child.end_position().row as u32,
+                            )
+                            .with_source_text(
+                                super::super::extract_source_text(
+                                    ctx.source,
+                                    child.start_position().row as u32,
+                                    child.end_position().row as u32,
+                                )
+                                .unwrap_or_default(),
+                            ),
+                    );
                     graph.add_edge(parent_id, fn_id, Edge::extracted(EdgeKind::Defines));
                     if let Some(body) = child.child_by_field_name("body") {
                         emit_calls(body, ctx.source, graph, fn_id);
@@ -179,11 +201,22 @@ fn walk_scope(
                 } else if let Some(body) = child.child_by_field_name("body") {
                     let line = child.start_position().row;
                     let qn = format!("file::{}::anonymous_fn_{}", ctx.file_uri, line);
-                    let fn_id = graph.add_node(Node::new(NodeKind::Function, &qn).with_source(
-                        ctx.file_uri.to_string(),
-                        line as u32,
-                        child.end_position().row as u32,
-                    ));
+                    let fn_id = graph.add_node(
+                        Node::new(NodeKind::Function, &qn)
+                            .with_source(
+                                ctx.file_uri.to_string(),
+                                line as u32,
+                                child.end_position().row as u32,
+                            )
+                            .with_source_text(
+                                super::super::extract_source_text(
+                                    ctx.source,
+                                    line as u32,
+                                    child.end_position().row as u32,
+                                )
+                                .unwrap_or_default(),
+                            ),
+                    );
                     graph.add_edge(parent_id, fn_id, Edge::extracted(EdgeKind::Defines));
                     emit_calls(body, ctx.source, graph, fn_id);
                 }
@@ -261,11 +294,20 @@ fn emit_class(
         None => return,
     };
     let class_id = graph.add_node(
-        Node::new(NodeKind::Class, scoped_qname(ctx.file_qn, scope, &nm)).with_source(
-            ctx.file_uri.to_string(),
-            node.start_position().row as u32,
-            node.end_position().row as u32,
-        ),
+        Node::new(NodeKind::Class, scoped_qname(ctx.file_qn, scope, &nm))
+            .with_source(
+                ctx.file_uri.to_string(),
+                node.start_position().row as u32,
+                node.end_position().row as u32,
+            )
+            .with_source_text(
+                super::super::extract_source_text(
+                    ctx.source,
+                    node.start_position().row as u32,
+                    node.end_position().row as u32,
+                )
+                .unwrap_or_default(),
+            ),
     );
     graph.add_edge(parent_id, class_id, Edge::extracted(EdgeKind::Defines));
     emit_ts_bases(node, ctx.source, graph, class_id);
@@ -285,11 +327,20 @@ fn emit_interface(
     let mut child_scope = scope.to_vec();
     child_scope.push(nm.clone());
     let iface_id = graph.add_node(
-        Node::new(NodeKind::Class, scoped_qname(ctx.file_qn, scope, &nm)).with_source(
-            ctx.file_uri.to_string(),
-            node.start_position().row as u32,
-            node.end_position().row as u32,
-        ),
+        Node::new(NodeKind::Class, scoped_qname(ctx.file_qn, scope, &nm))
+            .with_source(
+                ctx.file_uri.to_string(),
+                node.start_position().row as u32,
+                node.end_position().row as u32,
+            )
+            .with_source_text(
+                super::super::extract_source_text(
+                    ctx.source,
+                    node.start_position().row as u32,
+                    node.end_position().row as u32,
+                )
+                .unwrap_or_default(),
+            ),
     );
     graph.add_edge(parent_id, iface_id, Edge::extracted(EdgeKind::Defines));
     emit_ts_bases(node, ctx.source, graph, iface_id);
@@ -310,11 +361,22 @@ fn emit_type_alias(
     if let Some(name) = node.child_by_field_name("name") {
         let nm = text(name, source);
         let qn = scoped_qname(file_qn, scope, &nm);
-        let type_id = graph.add_node(Node::new(NodeKind::Type, qn).with_source(
-            file_uri.to_string(),
-            node.start_position().row as u32,
-            node.end_position().row as u32,
-        ));
+        let type_id = graph.add_node(
+            Node::new(NodeKind::Type, qn)
+                .with_source(
+                    file_uri.to_string(),
+                    node.start_position().row as u32,
+                    node.end_position().row as u32,
+                )
+                .with_source_text(
+                    super::super::extract_source_text(
+                        source,
+                        node.start_position().row as u32,
+                        node.end_position().row as u32,
+                    )
+                    .unwrap_or_default(),
+                ),
+        );
         graph.add_edge(parent_id, type_id, Edge::extracted(EdgeKind::Defines));
     }
 }
@@ -331,11 +393,22 @@ fn emit_enum(
     if let Some(name_node) = node.child_by_field_name("name") {
         let nm = text(name_node, source);
         let qn = scoped_qname(file_qn, scope, &nm);
-        let enum_id = graph.add_node(Node::new(NodeKind::Type, qn).with_source(
-            file_uri.to_string(),
-            node.start_position().row as u32,
-            node.end_position().row as u32,
-        ));
+        let enum_id = graph.add_node(
+            Node::new(NodeKind::Type, qn)
+                .with_source(
+                    file_uri.to_string(),
+                    node.start_position().row as u32,
+                    node.end_position().row as u32,
+                )
+                .with_source_text(
+                    super::super::extract_source_text(
+                        source,
+                        node.start_position().row as u32,
+                        node.end_position().row as u32,
+                    )
+                    .unwrap_or_default(),
+                ),
+        );
         graph.add_edge(parent_id, enum_id, Edge::extracted(EdgeKind::Defines));
     }
 }
@@ -357,6 +430,14 @@ fn emit_fn(
         ctx.file_uri.to_string(),
         node.start_position().row as u32,
         node.end_position().row as u32,
+    );
+    fn_node = fn_node.with_source_text(
+        super::super::extract_source_text(
+            ctx.source,
+            node.start_position().row as u32,
+            node.end_position().row as u32,
+        )
+        .unwrap_or_default(),
     );
     if is_test {
         fn_node = fn_node.with_property("is_test", serde_json::Value::Bool(true));
@@ -404,11 +485,20 @@ fn emit_var_functions(
             };
             let is_test = ctx.file_is_test || is_test_name(nm.rsplit('.').next().unwrap_or(&nm));
             let qn = scoped_qname(ctx.file_qn, scope, &nm);
-            let mut n = Node::new(kind, qn).with_source(
-                ctx.file_uri.to_string(),
-                node.start_position().row as u32,
-                node.end_position().row as u32,
-            );
+            let mut n = Node::new(kind, qn)
+                .with_source(
+                    ctx.file_uri.to_string(),
+                    node.start_position().row as u32,
+                    node.end_position().row as u32,
+                )
+                .with_source_text(
+                    super::super::extract_source_text(
+                        ctx.source,
+                        node.start_position().row as u32,
+                        node.end_position().row as u32,
+                    )
+                    .unwrap_or_default(),
+                );
             if is_test {
                 n = n.with_property("is_test", serde_json::Value::Bool(true));
             }
@@ -434,11 +524,20 @@ fn emit_method(
     };
     let is_test = ctx.file_is_test || is_test_name(nm.rsplit('.').next().unwrap_or(&nm));
     let qn = scoped_qname(ctx.file_qn, scope, &nm);
-    let mut n = Node::new(NodeKind::Method, qn).with_source(
-        ctx.file_uri.to_string(),
-        node.start_position().row as u32,
-        node.end_position().row as u32,
-    );
+    let mut n = Node::new(NodeKind::Method, qn)
+        .with_source(
+            ctx.file_uri.to_string(),
+            node.start_position().row as u32,
+            node.end_position().row as u32,
+        )
+        .with_source_text(
+            super::super::extract_source_text(
+                ctx.source,
+                node.start_position().row as u32,
+                node.end_position().row as u32,
+            )
+            .unwrap_or_default(),
+        );
     if is_test {
         n = n.with_property("is_test", serde_json::Value::Bool(true));
     }

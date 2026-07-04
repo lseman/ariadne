@@ -9,6 +9,7 @@
 //! ```toml
 //! [languages.rust]
 //! grammar = "rust"
+//! extractor = "rust"
 //! extensions = [".rs"]
 //! function_node_types = ["function_item", "closure_expression"]
 //! class_node_types = ["struct_item", "enum_item"]
@@ -28,8 +29,9 @@ use std::path::Path;
 const CONFIG_RELATIVE_PATH: &str = ".ariadne/languages.toml";
 const MAX_CUSTOM_LANGUAGES: usize = 20;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct Config {
+    #[serde(default)]
     languages: HashMap<String, LanguageEntry>,
 }
 
@@ -37,6 +39,7 @@ struct Config {
 struct LanguageEntry {
     extensions: Option<Vec<String>>,
     grammar: Option<String>,
+    extractor: Option<String>,
     #[serde(default)]
     function_node_types: Vec<String>,
     #[serde(default)]
@@ -57,6 +60,7 @@ struct LanguageEntry {
 pub struct LanguageDef {
     pub name: String,
     pub grammar: String,
+    pub extractor: String,
     pub extensions: Vec<String>,
     pub function_node_types: Vec<String>,
     pub class_node_types: Vec<String>,
@@ -70,10 +74,9 @@ impl LanguageDef {
     pub fn matches_ext(&self, path: &std::path::Path) -> bool {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             let ext = ext.to_lowercase();
-            self.extensions.iter().any(|e| {
-                let e = e.trim_start_matches('.').to_lowercase();
-                ext == e
-            })
+            self.extensions
+                .iter()
+                .any(|e| ext == normalize_extension(e))
         } else {
             false
         }
@@ -99,7 +102,8 @@ fn load_builtins() -> HashMap<String, LanguageDef> {
             let def = LanguageDef {
                 name: name.clone(),
                 grammar: entry.grammar.unwrap_or_else(|| name.clone()),
-                extensions: entry.extensions.unwrap_or_default(),
+                extractor: entry.extractor.unwrap_or_else(|| "generic".to_string()),
+                extensions: normalize_extensions(entry.extensions.unwrap_or_default()),
                 function_node_types: entry.function_node_types,
                 class_node_types: entry.class_node_types,
                 import_node_types: entry.import_node_types,
@@ -110,9 +114,6 @@ fn load_builtins() -> HashMap<String, LanguageDef> {
         })
         .collect()
 }
-
-/// Names of languages that come from the bundled defaults.
-const BUILTIN_NAMES: &[&str] = &["rust", "python", "cpp", "typescript", "tsx", "javascript"];
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -148,19 +149,24 @@ impl LanguageRegistry {
 
         if config_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&config_path) {
-                if let Ok(config) = toml::from_str::<Config>(&content) {
-                    if config.languages.len() > MAX_CUSTOM_LANGUAGES {
-                        tracing::warn!(
-                            "config has {} entries, using top {}",
-                            config.languages.len(),
-                            MAX_CUSTOM_LANGUAGES,
-                        );
+                match toml::from_str::<Config>(&content) {
+                    Ok(config) => {
+                        if config.languages.len() > MAX_CUSTOM_LANGUAGES {
+                            tracing::warn!(
+                                "config has {} entries, using top {}",
+                                config.languages.len(),
+                                MAX_CUSTOM_LANGUAGES,
+                            );
+                        }
+                        let mut entries: Vec<_> = config.languages.into_iter().collect();
+                        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+                        for (name, entry) in entries.into_iter().take(MAX_CUSTOM_LANGUAGES) {
+                            Self::merge_entry(&mut all, &name, entry);
+                        }
                     }
-                    for (name, entry) in config.languages.into_iter().take(MAX_CUSTOM_LANGUAGES) {
-                        Self::merge_entry(&mut all, &name, entry);
+                    Err(err) => {
+                        tracing::warn!("failed to parse {}: {}", config_path.display(), err);
                     }
-                } else {
-                    tracing::warn!("failed to parse {}", config_path.display());
                 }
             }
         }
@@ -171,30 +177,27 @@ impl LanguageRegistry {
     fn merge_entry(all: &mut HashMap<String, LanguageDef>, name: &str, entry: LanguageEntry) {
         let name_lower = name.to_lowercase();
 
-        // Built-in names cannot be overridden (but can merge node types)
-        let is_builtin = BUILTIN_NAMES.contains(&name_lower.as_str());
-
-        if is_builtin {
-            // Merge node types into existing built-in
-            if let Some(def) = all.get_mut(&name_lower) {
-                if !entry.function_node_types.is_empty() {
-                    def.function_node_types = entry.function_node_types;
-                }
-                if !entry.class_node_types.is_empty() {
-                    def.class_node_types = entry.class_node_types;
-                }
-                if !entry.import_node_types.is_empty() {
-                    def.import_node_types = entry.import_node_types;
-                }
-                if !entry.call_node_types.is_empty() {
-                    def.call_node_types = entry.call_node_types;
-                }
-                if let Some(exts) = entry.extensions {
-                    def.extensions = exts;
-                }
-                if let Some(grammar) = entry.grammar {
-                    def.grammar = grammar;
-                }
+        if let Some(def) = all.get_mut(&name_lower) {
+            if !entry.function_node_types.is_empty() {
+                def.function_node_types = entry.function_node_types;
+            }
+            if !entry.class_node_types.is_empty() {
+                def.class_node_types = entry.class_node_types;
+            }
+            if !entry.import_node_types.is_empty() {
+                def.import_node_types = entry.import_node_types;
+            }
+            if !entry.call_node_types.is_empty() {
+                def.call_node_types = entry.call_node_types;
+            }
+            if let Some(exts) = entry.extensions {
+                def.extensions = normalize_extensions(exts);
+            }
+            if let Some(grammar) = entry.grammar {
+                def.grammar = grammar;
+            }
+            if let Some(extractor) = entry.extractor {
+                def.extractor = extractor;
             }
         } else {
             // New custom language
@@ -224,7 +227,8 @@ impl LanguageRegistry {
             let def = LanguageDef {
                 name: name_lower.clone(),
                 grammar: entry.grammar.unwrap_or_default(),
-                extensions: entry.extensions.unwrap_or_default(),
+                extractor: entry.extractor.unwrap_or_else(|| "generic".to_string()),
+                extensions: normalize_extensions(entry.extensions.unwrap_or_default()),
                 function_node_types: entry.function_node_types,
                 class_node_types: entry.class_node_types,
                 import_node_types: entry.import_node_types,
@@ -256,6 +260,21 @@ impl LanguageRegistry {
     pub fn all(&self) -> Vec<&LanguageDef> {
         self.languages.values().collect()
     }
+}
+
+fn normalize_extension(ext: &str) -> String {
+    ext.trim_start_matches('.').to_lowercase()
+}
+
+fn normalize_extensions(extensions: Vec<String>) -> Vec<String> {
+    let mut normalized: Vec<_> = extensions
+        .into_iter()
+        .map(|ext| normalize_extension(&ext))
+        .filter(|ext| !ext.is_empty())
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 /// Get the global registry.
@@ -290,7 +309,7 @@ mod tests {
 
         // Rust must have extensions and node types.
         let rust = defs.get("rust").unwrap();
-        assert_eq!(rust.extensions, vec![".rs"]);
+        assert_eq!(rust.extensions, vec!["rs"]);
         assert!(rust
             .function_node_types
             .contains(&"function_item".to_string()));

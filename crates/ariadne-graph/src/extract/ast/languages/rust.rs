@@ -94,7 +94,11 @@ pub fn extract_file(path: &Path, graph: &mut dyn GraphMut) -> Result<()> {
                             || in_any_range(fn_node, &test_mod_ranges)
                     })
                     .unwrap_or(false);
-            let mut node = Node::new(kind, &qn).with_source(file_uri.clone(), start, end);
+            let mut node = Node::new(kind, &qn)
+                .with_source(file_uri.clone(), start, end)
+                .with_source_text(
+                    super::super::extract_source_text(&source, start, end).unwrap_or_default(),
+                );
             if is_test {
                 node = node.with_property("is_test", serde_json::Value::Bool(true));
             }
@@ -127,11 +131,12 @@ pub fn extract_file(path: &Path, graph: &mut dyn GraphMut) -> Result<()> {
         }
         if let Some(n) = name {
             let qn = format!("{}::{}", file_qn, n);
-            let id = graph.add_node(Node::new(NodeKind::Trait, &qn).with_source(
-                file_uri.clone(),
-                start,
-                end,
-            ));
+            let src = super::super::extract_source_text(&source, start, end).unwrap_or_default();
+            let id = graph.add_node(
+                Node::new(NodeKind::Trait, &qn)
+                    .with_source(file_uri.clone(), start, end)
+                    .with_source_text(src),
+            );
             graph.add_edge(file_id, id, Edge::extracted(EdgeKind::Defines));
         }
     }
@@ -160,11 +165,12 @@ pub fn extract_file(path: &Path, graph: &mut dyn GraphMut) -> Result<()> {
         }
         if let Some(n) = name {
             let qn = format!("{}::{}", file_qn, n);
-            let id = graph.add_node(Node::new(NodeKind::Class, &qn).with_source(
-                file_uri.clone(),
-                start,
-                end,
-            ));
+            let src = super::super::extract_source_text(&source, start, end).unwrap_or_default();
+            let id = graph.add_node(
+                Node::new(NodeKind::Class, &qn)
+                    .with_source(file_uri.clone(), start, end)
+                    .with_source_text(src),
+            );
             graph.add_edge(file_id, id, Edge::extracted(EdgeKind::Defines));
         }
     }
@@ -193,11 +199,12 @@ pub fn extract_file(path: &Path, graph: &mut dyn GraphMut) -> Result<()> {
         }
         if let Some(n) = name {
             let qn = format!("{}::{}", file_qn, n);
-            let id = graph.add_node(Node::new(NodeKind::Type, &qn).with_source(
-                file_uri.clone(),
-                start,
-                end,
-            ));
+            let src = super::super::extract_source_text(&source, start, end).unwrap_or_default();
+            let id = graph.add_node(
+                Node::new(NodeKind::Type, &qn)
+                    .with_source(file_uri.clone(), start, end)
+                    .with_source_text(src),
+            );
             graph.add_edge(file_id, id, Edge::extracted(EdgeKind::Defines));
         }
     }
@@ -279,7 +286,12 @@ pub fn extract_file(path: &Path, graph: &mut dyn GraphMut) -> Result<()> {
     Ok(())
 }
 
-fn emit_calls_in_subtree(node: tree_sitter::Node, source: &str, graph: &mut dyn GraphMut, caller: NodeId) {
+fn emit_calls_in_subtree(
+    node: tree_sitter::Node,
+    source: &str,
+    graph: &mut dyn GraphMut,
+    caller: NodeId,
+) {
     let mut walker = node.walk();
     let mut to_visit: Vec<tree_sitter::Node> = node.children(&mut walker).collect();
     while let Some(n) = to_visit.pop() {
@@ -293,7 +305,11 @@ fn emit_calls_in_subtree(node: tree_sitter::Node, source: &str, graph: &mut dyn 
         if n.kind() == "call_expression" {
             if let Some(func_node) = n.child_by_field_name("function") {
                 if let Some((name, scope)) = call_target_name(func_node, source) {
-                    add_ambiguous_call(graph, caller, &name, scope.as_deref());
+                    // For method calls like `self.foo()` or `graph.add_node()`,
+                    // capture the receiver so the resolver can disambiguate
+                    // between `Graph::foo` and `MotifBuilder::foo`.
+                    let receiver = extract_receiver(func_node, source);
+                    add_ambiguous_call(graph, caller, &name, scope.as_deref(), receiver.as_deref());
                 }
             }
         } else if n.kind() == "macro_invocation" {
@@ -375,7 +391,7 @@ fn emit_macro_calls(
                     ) {
                         continue;
                     }
-                    add_ambiguous_call(graph, caller, name_text, None);
+                    add_ambiguous_call(graph, caller, name_text, None, None);
                 }
             }
         }
@@ -386,7 +402,35 @@ fn emit_macro_calls(
     }
 }
 
-fn add_ambiguous_call(graph: &mut dyn GraphMut, caller: NodeId, name: &str, scope: Option<&str>) {
+/// Extract the receiver name from a method call like `graph.add_node()`.
+///
+/// Returns the identifier before the dot (`graph` in `graph.add_node()`).
+/// For path calls like `module::path::name`, the receiver would be the
+/// first segment of the scope prefix (e.g. `module` from `module::path::name`).
+fn extract_receiver(func_node: tree_sitter::Node, source: &str) -> Option<String> {
+    match func_node.kind() {
+        "field_expression" => {
+            // graph.add_node() — receiver is the `object` field
+            func_node
+                .child_by_field_name("object")
+                .and_then(|n| n.utf8_text(source.as_bytes()).ok().map(|s| s.to_string()))
+        }
+        "scoped_identifier" | "scoped_type_identifier" => {
+            // module::path::name — take the first segment as potential receiver
+            let text = func_node.utf8_text(source.as_bytes()).ok()?;
+            text.split("::").next().map(|s| s.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn add_ambiguous_call(
+    graph: &mut dyn GraphMut,
+    caller: NodeId,
+    name: &str,
+    scope: Option<&str>,
+    receiver: Option<&str>,
+) {
     if crate::extract::should_suppress_call_placeholder(name) {
         return;
     }
@@ -400,6 +444,14 @@ fn add_ambiguous_call(graph: &mut dyn GraphMut, caller: NodeId, name: &str, scop
         edge.properties.insert(
             "call_scope".into(),
             serde_json::Value::String(scope.to_string()),
+        );
+    }
+    if let Some(recv) = receiver {
+        // Store receiver so resolver can map it to impl types.
+        // Method calls like `graph.add_node()` carry `receiver: "graph"`.
+        edge.properties.insert(
+            "call_receiver".into(),
+            serde_json::Value::String(recv.to_string()),
         );
     }
     graph.add_edge(caller, callee_id, edge);

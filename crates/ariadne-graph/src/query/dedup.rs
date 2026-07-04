@@ -248,7 +248,7 @@ impl MinHash {
             // Double hashing: (a * h1 + b) % p, where p is a large prime
             let h1 = Self::hash_with_salt(shingle.as_bytes(), self.a[i]);
             let h2 = Self::hash_with_salt(shingle.as_bytes(), self.b[i]);
-            let h = ((self.a[i].wrapping_mul(h1 % 65521) + self.b[i] + h2) % 65521) as u32;
+            let h = ((self.a[i].wrapping_mul(h1 % 65521).wrapping_add(self.b[i]).wrapping_add(h2)) % 65521) as u32;
             if h < self.signature[i] {
                 self.signature[i] = h;
             }

@@ -70,11 +70,22 @@ fn walk_scope(
                 let mut child_scope = scope.clone();
                 child_scope.push(name.clone());
                 let qn = scoped_qname(file_qn, &child_scope);
-                let class_id = graph.add_node(Node::new(NodeKind::Class, &qn).with_source(
-                    file_uri.to_string(),
-                    child.start_position().row as u32,
-                    child.end_position().row as u32,
-                ));
+                let class_id = graph.add_node(
+                    Node::new(NodeKind::Class, &qn)
+                        .with_source(
+                            file_uri.to_string(),
+                            child.start_position().row as u32,
+                            child.end_position().row as u32,
+                        )
+                        .with_source_text(
+                            super::super::extract_source_text(
+                                source,
+                                child.start_position().row as u32,
+                                child.end_position().row as u32,
+                            )
+                            .unwrap_or_default(),
+                        ),
+                );
                 graph.add_edge(parent_id, class_id, Edge::extracted(EdgeKind::Defines));
                 emit_python_bases(child, source, graph, class_id);
                 if let Some(body) = child.child_by_field_name("body") {
@@ -105,11 +116,20 @@ fn walk_scope(
                 } else {
                     NodeKind::Function
                 };
-                let mut node = Node::new(kind, &qn).with_source(
-                    file_uri.to_string(),
-                    child.start_position().row as u32,
-                    child.end_position().row as u32,
-                );
+                let mut node = Node::new(kind, &qn)
+                    .with_source(
+                        file_uri.to_string(),
+                        child.start_position().row as u32,
+                        child.end_position().row as u32,
+                    )
+                    .with_source_text(
+                        super::super::extract_source_text(
+                            source,
+                            child.start_position().row as u32,
+                            child.end_position().row as u32,
+                        )
+                        .unwrap_or_default(),
+                    );
                 if is_test {
                     node = node.with_property("is_test", serde_json::Value::Bool(true));
                 }

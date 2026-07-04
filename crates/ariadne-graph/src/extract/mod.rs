@@ -7,7 +7,7 @@
 //!    (`Defines`, `Calls`, `Imports`, …). Deterministic, parallel, no
 //!    network. Implemented in [`ast`].
 //!
-//! 2. **Concept pass** — markdown / LaTeX text is parsed and
+//! 2. **Concept pass** — markdown / HTML text is parsed and
 //!    cross-linked to symbols discovered in pass 1 by name. Emits
 //!    `Document`, `Section`, `Concept` nodes and `Mentions` /
 //!    `Describes` edges with `Confidence::Inferred`. Implemented in
@@ -30,9 +30,8 @@ pub use flows::{
     FlowOptions,
 };
 pub use walker::{
-    derive_tested_by_edges, extract_directory, extract_directory_with_custom, extract_file,
-    extract_file_with_custom, ignore_set, is_relevant_source, is_supported,
-    resolve_call_placeholders, should_suppress_call_placeholder, IgnoreSet,
+    derive_tested_by_edges, extract_directory, extract_file, ignore_set, is_relevant_source,
+    is_supported, resolve_call_placeholders, should_suppress_call_placeholder, IgnoreSet,
 };
 
 // Re-export the language registry for external use.

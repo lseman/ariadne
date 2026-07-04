@@ -46,13 +46,30 @@ html5ever = "0.26"
 markup5ever_rcdom = "0.2.0"
 # 6.x rather than 7+/8+: newer majors raise MSRV above the 1.75 pin.
 notify = "6.1"
+jaro_winkler = "0.2.1"
+unicode-normalization = "0.1.25"
 
 toml = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3.10"
+
 # MSRV pins for Rust 1.75 — newer transitive deps require edition2024 or 1.80+.
 # These constrain the resolver; they are not used directly in code.
 indexmap = "=2.6.0"
 hashbrown = "=0.15.2"
 rayon-core = "=1.12.1"
-jaro_winkler = "0.2.1"
-unicode-normalization = "0.1.25"
 siphasher = "1.0.3"
+# criterion 0.5's cargo_bench_support/plotters chain pulls these; pin below
+# their MSRV-1.75-breaking versions (half 2.5+ / is-terminal 0.4.10+ raise MSRV).
+half = "=2.4.1"
+is-terminal = "=0.4.9"
+
+[[bench]]
+name = "store_load"
+harness = false
+
+[[bench]]
+name = "extraction"
+harness = false

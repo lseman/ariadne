@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 const RRF_K: f32 = 60.0;
+const SOURCE_SATURATION_DECAY: f32 = 0.72;
 
 #[derive(Debug, Clone)]
 pub struct SearchHit {
@@ -26,6 +27,7 @@ pub fn ranked_search(graph: &Graph, query: &str, limit: usize) -> Vec<SearchHit>
     }
 
     let tokens: Vec<&str> = q.split_whitespace().collect();
+    let query_identifiers = extract_query_identifiers(query);
     let mut hits: Vec<SearchHit> = graph
         .nodes()
         .filter_map(|(id, n)| {
@@ -59,6 +61,17 @@ pub fn ranked_search(graph: &Graph, query: &str, limit: usize) -> Vec<SearchHit>
                 signals.push("tokens");
                 matched = true;
             }
+            let identifier_hits = query_identifiers
+                .iter()
+                .filter(|identifier| {
+                    name.contains(identifier.as_str()) || qname.contains(identifier.as_str())
+                })
+                .count();
+            if identifier_hits > 0 {
+                score += 45.0 * identifier_hits as f32 / query_identifiers.len() as f32;
+                signals.push("identifier");
+                matched = true;
+            }
             // Fuzzy scoring is expensive (7 similarity algorithms). Skip when
             // a cheaper match already hit, and skip when the candidate is
             // shorter than the query (can't be a fuzzy match for typos).
@@ -82,6 +95,7 @@ pub fn ranked_search(graph: &Graph, query: &str, limit: usize) -> Vec<SearchHit>
                 signals.push("graph");
             }
             score += kind_prior(n.kind);
+            apply_noise_penalty(&mut score, &mut signals, n, &q);
 
             if score > 0.0 {
                 Some(SearchHit { id, score, signals })
@@ -91,6 +105,13 @@ pub fn ranked_search(graph: &Graph, query: &str, limit: usize) -> Vec<SearchHit>
         })
         .collect();
 
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.0.cmp(&b.id.0))
+    });
+    apply_source_saturation(&mut hits, graph);
     hits.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -426,6 +447,31 @@ fn query_kind_boosts(query: &str) -> Vec<(NodeKind, f32)> {
     boosts
 }
 
+fn extract_query_identifiers(query: &str) -> Vec<String> {
+    let mut identifiers = Vec::new();
+    for token in query.split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | ':'))) {
+        let token = token.trim_matches(|c: char| matches!(c, '.' | ':' | '_'));
+        if token.len() < 3 || !is_identifier_shaped(token) {
+            continue;
+        }
+        let normalized = normalize_identifier(&token.replace("::", " "));
+        if !normalized.is_empty() && !identifiers.contains(&normalized) {
+            identifiers.push(normalized);
+        }
+    }
+    identifiers
+}
+
+fn is_identifier_shaped(token: &str) -> bool {
+    let has_separator = token.contains('_') || token.contains('.') || token.contains("::");
+    let mut chars = token.chars().filter(|c| c.is_alphabetic());
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let has_camel_boundary = first.is_uppercase() && chars.any(|c| c.is_uppercase());
+    has_separator || has_camel_boundary
+}
+
 /// FTS5-boosted search.
 ///
 /// Runs a SQLite FTS5 query for fast candidate retrieval, then blends the
@@ -440,8 +486,9 @@ pub fn fts_ranked_search(
 ) -> Vec<SearchHit> {
     let fts_hits = store.fts_search(query, limit * 3).unwrap_or_default();
     let semantic_hits = store.semantic_search(query, limit * 3).unwrap_or_default();
+    let query_identifiers = extract_query_identifiers(query);
 
-    if fts_hits.is_empty() && semantic_hits.is_empty() {
+    if fts_hits.is_empty() && semantic_hits.is_empty() && query_identifiers.is_empty() {
         return ranked_search(graph, query, limit);
     }
 
@@ -526,6 +573,18 @@ pub fn fts_ranked_search(
                 hit.signals.push("qualified_boost");
             }
         }
+        if !query_identifiers.is_empty() {
+            let normalized_qname = normalize_identifier(&node.qualified_name.replace("::", " "));
+            if query_identifiers
+                .iter()
+                .any(|identifier| normalized_qname.contains(identifier))
+            {
+                hit.score *= 1.30;
+                if !hit.signals.contains(&"identifier_boost") {
+                    hit.signals.push("identifier_boost");
+                }
+            }
+        }
         if symbol_query && is_definition_like_node(node) && symbol_matches_node(query, node) {
             hit.score *= 1.35;
             if !hit.signals.contains(&"definition_boost") {
@@ -538,6 +597,7 @@ pub fn fts_ranked_search(
                 hit.signals.push("placeholder_penalty");
             }
         }
+        apply_noise_penalty(&mut hit.score, &mut hit.signals, node, &normalized_query);
         if !query_tokens.is_empty()
             && source_stem_matches(node.source_uri.as_deref(), &query_tokens)
         {
@@ -556,8 +616,32 @@ pub fn fts_ranked_search(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.id.0.cmp(&b.id.0))
     });
+    apply_source_saturation(&mut hits, graph);
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.0.cmp(&b.id.0))
+    });
     hits.truncate(limit);
     hits
+}
+
+fn apply_source_saturation(hits: &mut [SearchHit], graph: &Graph) {
+    let mut seen_by_source: HashMap<String, usize> = HashMap::new();
+    for hit in hits {
+        let Some(source) = graph.node(hit.id).and_then(|node| node.source_uri.as_ref()) else {
+            continue;
+        };
+        let count = seen_by_source.entry(source.clone()).or_insert(0);
+        if *count > 0 {
+            hit.score *= SOURCE_SATURATION_DECAY.powi(*count as i32);
+            if !hit.signals.contains(&"source_saturation") {
+                hit.signals.push("source_saturation");
+            }
+        }
+        *count += 1;
+    }
 }
 
 fn reciprocal_rank_boost(rank: usize, weight: f32) -> f32 {
@@ -604,6 +688,74 @@ fn symbol_matches_node(query: &str, node: &crate::core::Node) -> bool {
     query_norm == name_norm
         || compact(&query_norm) == compact(&name_norm)
         || normalize_identifier(&node.qualified_name.replace("::", " ")).contains(&query_norm)
+}
+
+fn apply_noise_penalty(
+    score: &mut f32,
+    signals: &mut Vec<&'static str>,
+    node: &crate::core::Node,
+    normalized_query: &str,
+) {
+    let Some(source) = node.source_uri.as_deref() else {
+        return;
+    };
+    if should_preserve_noise(normalized_query) {
+        return;
+    }
+
+    let source_lower = source.replace('\\', "/").to_ascii_lowercase();
+    let mut multiplier: f32 = 1.0;
+    if crate::extract::test_detect::is_test_file_path(Path::new(source)) {
+        multiplier = multiplier.min(0.72);
+    }
+    if source_lower.ends_with(".d.ts") {
+        multiplier = multiplier.min(0.70);
+    }
+    if source_lower.contains("/examples/")
+        || source_lower.starts_with("examples/")
+        || source_lower.contains("/sample/")
+        || source_lower.starts_with("sample/")
+    {
+        multiplier = multiplier.min(0.82);
+    }
+    if source_lower.contains("/legacy/")
+        || source_lower.starts_with("legacy/")
+        || source_lower.contains("/compat/")
+        || source_lower.starts_with("compat/")
+        || source_lower.contains("/generated/")
+        || source_lower.starts_with("generated/")
+    {
+        multiplier = multiplier.min(0.78);
+    }
+
+    if multiplier < 1.0 {
+        *score *= multiplier;
+        if !signals.contains(&"noise_penalty") {
+            signals.push("noise_penalty");
+        }
+    }
+}
+
+fn should_preserve_noise(normalized_query: &str) -> bool {
+    normalized_query.split_whitespace().any(|token| {
+        matches!(
+            token,
+            "test"
+                | "tests"
+                | "testing"
+                | "spec"
+                | "specs"
+                | "example"
+                | "examples"
+                | "sample"
+                | "samples"
+                | "legacy"
+                | "compat"
+                | "generated"
+                | "declaration"
+                | "types"
+        )
+    })
 }
 
 fn search_query_tokens(normalized_query: &str) -> Vec<String> {
@@ -716,6 +868,18 @@ mod tests {
     }
 
     #[test]
+    fn ranked_search_extracts_identifiers_from_natural_language() {
+        let mut g = Graph::new();
+        let next = g.add_node(Node::new(NodeKind::Method, "gin::Context::Next"));
+        g.add_node(Node::new(NodeKind::Class, "gin::Context"));
+        g.add_node(Node::new(NodeKind::Function, "pkg::middleware_chain"));
+
+        let hits = ranked_search(&g, "who advances the middleware via Context.Next", 10);
+        assert_eq!(hits[0].id, next);
+        assert!(hits[0].signals.contains(&"identifier"));
+    }
+
+    #[test]
     fn search_normalization_preserves_unicode_identifiers() {
         let mut g = Graph::new();
         let cafe = g.add_node(Node::new(NodeKind::Function, "pkg::CaféParser"));
@@ -812,6 +976,102 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_search_boosts_identifiers_inside_natural_language() {
+        let mut g = Graph::new();
+        let next = g.add_node(
+            Node::new(NodeKind::Method, "gin::Context::Next").with_source("src/context.rs", 1, 5),
+        );
+        g.add_node(Node::new(NodeKind::Class, "gin::Context").with_source("src/context.rs", 1, 50));
+        g.add_node(
+            Node::new(NodeKind::Function, "pkg::middleware_chain").with_source(
+                "src/middleware.rs",
+                1,
+                10,
+            ),
+        );
+
+        let mut store = Store::open_in_memory().unwrap();
+        store.save(&g).unwrap();
+
+        let hits = fts_ranked_search(
+            &store,
+            &g,
+            "who advances the middleware chain via Context.Next",
+            10,
+        );
+        assert_eq!(hits[0].id, next);
+        assert!(hits[0].signals.contains(&"identifier_boost"));
+    }
+
+    #[test]
+    fn ranked_search_penalizes_test_files_for_generic_queries() {
+        let mut g = Graph::new();
+        let prod = g.add_node(Node::new(NodeKind::Function, "pkg::login").with_source(
+            "src/auth.rs",
+            10,
+            20,
+        ));
+        let test = g.add_node(
+            Node::new(NodeKind::Function, "pkg::tests::login").with_source(
+                "tests/test_auth.rs",
+                10,
+                20,
+            ),
+        );
+
+        let hits = ranked_search(&g, "login", 10);
+        assert_eq!(hits[0].id, prod);
+        let test_hit = hits.iter().find(|hit| hit.id == test).unwrap();
+        assert!(test_hit.signals.contains(&"noise_penalty"));
+
+        let test_hits = ranked_search(&g, "login tests", 10);
+        let test_hit = test_hits.iter().find(|hit| hit.id == test).unwrap();
+        assert!(!test_hit.signals.contains(&"noise_penalty"));
+    }
+
+    #[test]
+    fn hybrid_search_penalizes_declaration_and_example_files() {
+        let mut g = Graph::new();
+        let prod = g.add_node(Node::new(NodeKind::Function, "pkg::Client").with_source(
+            "src/client.ts",
+            1,
+            20,
+        ));
+        let declaration = g.add_node(
+            Node::new(NodeKind::Function, "pkg::types::Client").with_source(
+                "src/client.d.ts",
+                1,
+                20,
+            ),
+        );
+        let example = g.add_node(
+            Node::new(NodeKind::Function, "pkg::examples::Client").with_source(
+                "examples/client.ts",
+                1,
+                20,
+            ),
+        );
+
+        let mut store = Store::open_in_memory().unwrap();
+        store.save(&g).unwrap();
+
+        let hits = fts_ranked_search(&store, &g, "Client", 10);
+        assert_eq!(hits[0].id, prod);
+        assert!(hits
+            .iter()
+            .find(|hit| hit.id == declaration)
+            .unwrap()
+            .signals
+            .contains(&"noise_penalty"));
+        assert!(hits
+            .iter()
+            .find(|hit| hit.id == example)
+            .unwrap()
+            .signals
+            .contains(&"noise_penalty"));
+    }
+
+    #[test]
     fn hybrid_search_penalizes_call_placeholders() {
         let mut g = Graph::new();
         let real = g.add_node(
@@ -848,5 +1108,30 @@ mod tests {
         let hits = fts_ranked_search(&store, &g, "auth", 10);
         let auth_hit = hits.iter().find(|hit| hit.id == auth_a).unwrap();
         assert!(auth_hit.signals.contains(&"file_coherence"));
+    }
+
+    #[test]
+    fn ranked_search_applies_source_saturation_to_repeated_file_hits() {
+        let mut g = Graph::new();
+        let first = g.add_node(
+            Node::new(NodeKind::Function, "pkg::auth::auth_login").with_source("src/auth.rs", 1, 5),
+        );
+        let second = g.add_node(
+            Node::new(NodeKind::Function, "pkg::auth::auth_logout")
+                .with_source("src/auth.rs", 7, 11),
+        );
+        let other = g.add_node(
+            Node::new(NodeKind::Function, "pkg::session::auth_session")
+                .with_source("src/session.rs", 1, 5),
+        );
+
+        let hits = ranked_search(&g, "auth", 10);
+        let first_hit = hits.iter().find(|hit| hit.id == first).unwrap();
+        let second_hit = hits.iter().find(|hit| hit.id == second).unwrap();
+        let other_hit = hits.iter().find(|hit| hit.id == other).unwrap();
+
+        assert!(!first_hit.signals.contains(&"source_saturation"));
+        assert!(second_hit.signals.contains(&"source_saturation"));
+        assert!(!other_hit.signals.contains(&"source_saturation"));
     }
 }

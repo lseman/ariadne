@@ -11,6 +11,8 @@ use super::query::{edge_row_from_sql, node_row_from_sql};
 pub const DEFAULT_EMBEDDING_MODEL: &str = "ariadne-hash-v2";
 pub const DEFAULT_EMBEDDING_DIM: usize = 384;
 
+type EmbeddingNodeRow = (i64, String, String, String, Option<String>, Option<String>);
+
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS nodes (
     id             INTEGER PRIMARY KEY,
@@ -22,7 +24,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     line_end       INTEGER,
     properties     TEXT NOT NULL DEFAULT '{}',
     valid_from     TEXT,
-    valid_to       TEXT
+    valid_to       TEXT,
+    source_text    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_kind  ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_qname ON nodes(qualified_name);
@@ -61,7 +64,8 @@ CREATE TABLE IF NOT EXISTS node_versions (
     line_end       INTEGER,
     properties     TEXT NOT NULL DEFAULT '{}',
     valid_from     TEXT,
-    valid_to       TEXT
+    valid_to       TEXT,
+    source_text    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_node_versions_qname ON node_versions(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_node_versions_source ON node_versions(source_uri);
@@ -95,7 +99,7 @@ CREATE TABLE IF NOT EXISTS file_state (
     indexed_at_unix INTEGER NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '2');
 
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     kind,
@@ -130,7 +134,27 @@ impl Store {
             .unwrap_or_else(|_| "memory".to_string());
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
         conn.execute_batch(SCHEMA)?;
+        // Migrate: add source_text column for v1→v2.
+        Self::migrate_v1(&conn)?;
         Ok(Self { conn })
+    }
+
+    fn migrate_v1(conn: &Connection) -> Result<()> {
+        // Check if source_text column exists by trying to query it.
+        let has_column = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name='source_text'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+        if has_column == 0 {
+            conn.execute("ALTER TABLE nodes ADD COLUMN source_text TEXT", [])?;
+            conn.execute("ALTER TABLE node_versions ADD COLUMN source_text TEXT", [])?;
+            conn.execute("UPDATE meta SET value='2' WHERE key='schema_version'", [])
+                .ok();
+        }
+        Ok(())
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -159,8 +183,8 @@ impl Store {
         let mut node_stmt = tx.prepare(
             "INSERT INTO nodes (kind, name, qualified_name, source_uri,
                                 line_start, line_end, properties,
-                                valid_from, valid_to)
-             VALUES (?,?,?,?,?,?,?,?,?)",
+                                valid_from, valid_to, source_text)
+             VALUES (?,?,?,?,?,?,?,?,?,?)",
         )?;
         let mut id_map: HashMap<u32, i64> = HashMap::new();
         for (nid, node) in graph.nodes() {
@@ -179,6 +203,7 @@ impl Store {
                 props,
                 node.valid_from,
                 node.valid_to,
+                node.source_text.clone(),
             ])?;
             id_map.insert(nid.0, tx.last_insert_rowid());
         }
@@ -380,7 +405,7 @@ impl Store {
         let mut seen = std::collections::HashSet::new();
         let mut stmt = self.conn.prepare(
             "SELECT kind, qualified_name, source_uri, line_start, line_end,
-                    properties, valid_from, valid_to
+                    properties, valid_from, valid_to, source_text
              FROM nodes
              WHERE source_uri = ?1",
         )?;
@@ -395,6 +420,7 @@ impl Store {
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             })?;
             for row in rows {
@@ -524,11 +550,11 @@ impl Store {
         let mut out = Vec::new();
         let mut stmt = self.conn.prepare(
             "SELECT kind, qualified_name, source_uri, line_start, line_end,
-                    properties, valid_from, valid_to
+                    properties, valid_from, valid_to, source_text
              FROM nodes
              UNION ALL
              SELECT kind, qualified_name, source_uri, line_start, line_end,
-                    properties, valid_from, valid_to
+                    properties, valid_from, valid_to, source_text
              FROM node_versions",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -542,6 +568,7 @@ impl Store {
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ),
             })
         })?;
@@ -726,9 +753,10 @@ impl Store {
                 DEFAULT_EMBEDDING_MODEL
             );
         }
-        let rows: Vec<(i64, String, String, String, Option<String>)> = {
+        // Collect node data before starting the transaction.
+        let nodes_data: Vec<EmbeddingNodeRow> = {
             let mut stmt = self.conn.prepare(
-                "SELECT id, kind, name, qualified_name, source_uri
+                "SELECT id, kind, name, qualified_name, source_uri, source_text
                  FROM nodes
                  WHERE qualified_name NOT LIKE 'call::%'",
             )?;
@@ -739,6 +767,7 @@ impl Store {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             })?;
             let mut out = Vec::new();
@@ -750,17 +779,22 @@ impl Store {
 
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM embeddings", [])?;
-        for (node_id, kind, name, qname, source_uri) in rows {
+        for (row_id, kind, name, qname, source_uri, source_text) in nodes_data {
             let text = super::embedding::embedding_source_text(
                 &kind,
                 &name,
                 &qname,
                 source_uri.as_deref(),
+                source_text.as_deref(),
             );
             let vector = super::embedding::semantic_embedding(&text);
             tx.execute(
                 "INSERT INTO embeddings(node_id, model, vector) VALUES (?1, ?2, ?3)",
-                params![node_id, model, super::embedding::encode_embedding(&vector)],
+                params![
+                    row_id,
+                    DEFAULT_EMBEDDING_MODEL,
+                    super::embedding::encode_embedding(&vector)
+                ],
             )?;
         }
         tx.commit()?;
