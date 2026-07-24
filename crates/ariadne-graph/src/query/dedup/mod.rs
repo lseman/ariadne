@@ -26,10 +26,15 @@
 //! **Pass 6 — Union-find merge**: Consolidate merges, pick winners,
 //! and rewire all edges.
 
+mod lsh;
+mod minhash;
+mod union_find;
+
 use crate::core::{Edge, EdgeId, Graph, Node, NodeId, NodeKind};
 use jaro_winkler::jaro_winkler;
+use lsh::lsh_candidate_pairs;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use union_find::UnionFind;
 use unicode_normalization::UnicodeNormalization;
 
 // ---------------------------------------------------------------------------
@@ -66,8 +71,6 @@ pub struct DedupOptions {
     /// already have unique `qualified_name` and are excluded by default.
     pub eligible_kinds: HashSet<NodeKind>,
 }
-
-// Remove Copy since eligible_kinds is HashSet (not Copy) - already removed above, keeping struct without Copy
 
 impl Default for DedupOptions {
     fn default() -> Self {
@@ -187,301 +190,6 @@ fn passes_entropy_gate(normalized: &str, threshold: f64) -> bool {
     }
     let ent = shannon_entropy_str(normalized);
     ent >= threshold
-}
-
-// ---------------------------------------------------------------------------
-// Pass 3: MinHash + LSH blocking
-// ---------------------------------------------------------------------------
-
-/// A simple MinHash implementation using SipHash-derived permutation functions.
-///
-/// Each MinHash signature is a fixed-length vector of u32 values. Two sets
-/// produce the same minimum hash value with probability equal to their
-/// Jaccard similarity.
-struct MinHash {
-    a: Vec<u64>, // multiplication constant for permutation
-    b: Vec<u64>, // additive constant for permutation
-    signature: Vec<u32>,
-}
-
-/// Generate a simple pseudo-random u64 from a seed using splitmix64.
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9e3779b97f4a7c15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
-    z ^= z >> 31;
-    z
-}
-
-impl MinHash {
-    /// Create a new MinHash with the given number of permutations.
-    fn new(num_permutations: usize) -> Self {
-        let mut state: u64 = 0x6c62272e07bb0142;
-        let seeds: Vec<u64> = (0..num_permutations)
-            .map(|_| {
-                splitmix64(&mut state);
-                splitmix64(&mut state)
-            })
-            .collect();
-        let signature = vec![u32::MAX; num_permutations];
-        let a: Vec<u64> = (0..num_permutations)
-            .map(|i| seeds[i] ^ (i as u64))
-            .collect();
-        let b: Vec<u64> = (0..num_permutations)
-            .map(|i| seeds[i] ^ (i as u64).wrapping_mul(31))
-            .collect();
-        Self { a, b, signature }
-    }
-
-    /// Hash a string using FNV-1a with a salt.
-    fn hash_with_salt(data: &[u8], salt: u64) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        salt.hash(&mut hasher);
-        data.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    /// Update MinHash with a shingle (string).
-    fn update(&mut self, shingle: &str) {
-        for i in 0..self.signature.len() {
-            // Double hashing: (a * h1 + b) % p, where p is a large prime
-            let h1 = Self::hash_with_salt(shingle.as_bytes(), self.a[i]);
-            let h2 = Self::hash_with_salt(shingle.as_bytes(), self.b[i]);
-            let h = ((self.a[i]
-                .wrapping_mul(h1 % 65521)
-                .wrapping_add(self.b[i])
-                .wrapping_add(h2))
-                % 65521) as u32;
-            if h < self.signature[i] {
-                self.signature[i] = h;
-            }
-        }
-    }
-
-    /// Build a MinHash signature from an iterable of strings.
-    fn from_iter(iter: impl IntoIterator<Item = String>, num_permutations: usize) -> Self {
-        let mut mh = Self::new(num_permutations);
-        for item in iter {
-            mh.update(&item);
-        }
-        mh
-    }
-
-    /// Estimate Jaccard similarity between two MinHash signatures.
-    fn jaccard(&self, other: &MinHash) -> f32 {
-        if self.signature.is_empty() {
-            return 0.0;
-        }
-        let matches = self
-            .signature
-            .iter()
-            .zip(&other.signature)
-            .filter(|(a, b)| a == b)
-            .count();
-        matches as f32 / self.signature.len() as f32
-    }
-}
-
-/// Generate character n-gram shingles from a label.
-fn shingle(label: &str, size: usize) -> Vec<String> {
-    if label.len() < size {
-        return vec![label.to_string()];
-    }
-    label
-        .as_bytes()
-        .windows(size)
-        .map(|w| String::from_utf8_lossy(w).to_string())
-        .collect()
-}
-
-/// LSH index for MinHash signatures.
-struct LshIndex {
-    /// Hash tables: one per band. Each maps a band signature → list of node IDs.
-    tables: Vec<HashMap<Vec<u32>, Vec<NodeId>>>,
-    num_bands: usize,
-    row_length: usize,
-}
-
-impl LshIndex {
-    fn new(num_bands: usize, row_length: usize) -> Self {
-        let tables: Vec<_> = (0..num_bands).map(|_| HashMap::new()).collect();
-        Self {
-            tables,
-            num_bands,
-            row_length,
-        }
-    }
-
-    /// Add a MinHash signature with its node ID.
-    fn add(&mut self, signature: &MinHash, node_id: NodeId) {
-        let sig = &signature.signature;
-        let row_len = self.row_length;
-
-        for band in 0..self.num_bands {
-            let start = band * row_len;
-            let end = start + row_len;
-            if end > sig.len() {
-                continue;
-            }
-            let band_sig: Vec<u32> = sig[start..end].to_vec();
-            self.tables[band].entry(band_sig).or_default().push(node_id);
-        }
-    }
-
-    /// Find candidate pairs: all node IDs that share at least one band.
-    fn get_candidates(&self, signature: &MinHash) -> HashSet<NodeId> {
-        let sig = &signature.signature;
-        let row_len = self.row_length;
-        let mut candidates = HashSet::new();
-
-        for band in 0..self.num_bands {
-            let start = band * row_len;
-            let end = start + row_len;
-            if end > sig.len() {
-                continue;
-            }
-            let band_sig: Vec<u32> = sig[start..end].to_vec();
-            if let Some(ids) = self.tables[band].get(&band_sig) {
-                for id in ids {
-                    candidates.insert(*id);
-                }
-            }
-        }
-        candidates
-    }
-}
-
-/// Run MinHash/LSH to find candidate pairs.
-///
-/// Returns a list of (node_id_a, node_id_b, jaccard_estimate) for pairs
-/// that share at least one LSH band. The caller should filter further
-/// using Jaro-Winkler.
-fn lsh_candidate_pairs(
-    nodes: &[&Node],
-    node_indices: &[NodeId],
-    options: &DedupOptions,
-) -> Vec<(NodeId, NodeId, f32)> {
-    let mut lsh = LshIndex::new(options.num_bands, options.row_length);
-
-    // Build MinHash signatures for all nodes
-    let mut signatures: HashMap<NodeId, MinHash> = HashMap::new();
-    for (i, node) in nodes.iter().enumerate() {
-        let shingles = shingle(&node.name, options.shingle_size);
-        let sig = MinHash::from_iter(shingles, options.num_permutations);
-        signatures.insert(node_indices[i], sig);
-    }
-
-    // Add all signatures to the LSH index
-    for (id, sig) in &signatures {
-        lsh.add(sig, *id);
-    }
-
-    // For each node, find candidates via LSH and compute Jaccard
-    let mut pairs: Vec<(NodeId, NodeId, f32)> = Vec::new();
-    let mut pair_seen = HashSet::new();
-
-    for (&id_a, sig_a) in &signatures {
-        let candidates = lsh.get_candidates(sig_a);
-        for id_b in candidates {
-            if id_b == id_a {
-                continue;
-            }
-            let pair = if id_a < id_b {
-                (id_a, id_b)
-            } else {
-                (id_b, id_a)
-            };
-            if pair_seen.contains(&pair) {
-                continue;
-            }
-            pair_seen.insert(pair);
-            if let Some(sig_b) = signatures.get(&id_b) {
-                let jaccard = sig_a.jaccard(sig_b);
-                if jaccard >= options.jaccard_threshold {
-                    pairs.push((id_a, id_b, jaccard));
-                }
-            }
-        }
-    }
-    pairs
-}
-
-// ---------------------------------------------------------------------------
-// Pass 4: Jaro-Winkler verification + community boost
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Pass 5 + 6: Union-Find merge
-// ---------------------------------------------------------------------------
-
-/// Simple Union-Find (disjoint-set) data structure with union-by-rank and
-/// path compression.
-struct UnionFind {
-    parent: HashMap<NodeId, NodeId>,
-    rank: HashMap<NodeId, u32>,
-}
-
-impl UnionFind {
-    fn new() -> Self {
-        Self {
-            parent: HashMap::new(),
-            rank: HashMap::new(),
-        }
-    }
-
-    fn make_set(&mut self, node: NodeId) {
-        self.parent.insert(node, node);
-        self.rank.entry(node).or_insert(0);
-    }
-
-    fn find(&mut self, node: NodeId) -> NodeId {
-        // Path compression: iterative to avoid recursive borrow issues
-        let mut current = node;
-        let mut path = vec![];
-        while let Some(&p) = self.parent.get(&current) {
-            if p == current {
-                break;
-            }
-            path.push(current);
-            current = p;
-        }
-        // Compress path
-        for &n in &path {
-            self.parent.insert(n, current);
-        }
-        current
-    }
-
-    fn union(&mut self, a: NodeId, b: NodeId) {
-        let root_a = self.find(a);
-        let root_b = self.find(b);
-        if root_a == root_b {
-            return;
-        }
-        // Union by rank: larger rank becomes parent
-        let rank_a = self.rank.get(&root_a).copied().unwrap_or(0);
-        let rank_b = self.rank.get(&root_b).copied().unwrap_or(0);
-        if rank_a < rank_b {
-            self.parent.insert(root_a, root_b);
-        } else if rank_a > rank_b {
-            self.parent.insert(root_b, root_a);
-        } else {
-            self.parent.insert(root_b, root_a);
-            *self.rank.get_mut(&root_a).unwrap() += 1;
-        }
-    }
-
-    /// Collect all merges: (loser, winner) pairs where winner is the root.
-    fn merges(&self) -> Vec<(NodeId, NodeId)> {
-        let mut result = Vec::new();
-        for (&node, &root) in &self.parent {
-            if node != root {
-                result.push((node, root));
-            }
-        }
-        result
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -712,42 +420,6 @@ mod tests {
     }
 
     #[test]
-    fn test_minhash_jaccard_exact_match() {
-        let items = vec![
-            "the".to_string(),
-            "quick".to_string(),
-            "brown".to_string(),
-            "fox".to_string(),
-        ];
-        let mh1 = MinHash::from_iter(items.clone(), 64);
-        let mh2 = MinHash::from_iter(items, 64);
-        assert!((mh1.jaccard(&mh2) - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_minhash_jaccard_partial_overlap() {
-        let items1: Vec<String> = (0..20).map(|i| format!("item_{}", i)).collect();
-        let items2: Vec<String> = (10..30).map(|i| format!("item_{}", i)).collect();
-        // 10/30 overlap = 0.333... Jaccard
-        let mh1 = MinHash::from_iter(items1, 64);
-        let mh2 = MinHash::from_iter(items2, 64);
-        let jaccard = mh1.jaccard(&mh2);
-        // Allow some tolerance due to probabilistic nature
-        assert!(jaccard > 0.1 && jaccard < 0.7);
-    }
-
-    #[test]
-    fn test_union_find() {
-        let mut uf = UnionFind::new();
-        uf.make_set(NodeId(1));
-        uf.make_set(NodeId(2));
-        uf.make_set(NodeId(3));
-        uf.union(NodeId(1), NodeId(2));
-        assert_eq!(uf.find(NodeId(1)), uf.find(NodeId(2)));
-        assert_ne!(uf.find(NodeId(1)), uf.find(NodeId(3)));
-    }
-
-    #[test]
     fn test_dedup_excludes_code_nodes() {
         let mut graph = Graph::new();
         make_node(&mut graph, NodeKind::Function, "login");
@@ -797,24 +469,6 @@ mod tests {
 
         // Community boost may help merge even with default threshold
         let _ = result;
-    }
-
-    #[test]
-    fn test_shingle() {
-        let shingles = shingle("hello", 3);
-        assert_eq!(shingles, vec!["hel", "ell", "llo"]);
-    }
-
-    #[test]
-    fn test_lsh_index() {
-        let mut lsh = LshIndex::new(12, 5);
-        let sig = MinHash::from_iter(vec!["a".into(), "b".into(), "c".into()], 64);
-        lsh.add(&sig, NodeId(1));
-        lsh.add(&sig, NodeId(2)); // Same signature
-
-        let candidates = lsh.get_candidates(&sig);
-        assert!(candidates.contains(&NodeId(1)));
-        assert!(candidates.contains(&NodeId(2)));
     }
 
     #[test]
