@@ -90,7 +90,7 @@ pub fn extract_directory(root: &Path, graph: &mut dyn GraphMut) -> Result<usize>
         .filter_entry(|e| !ignore.is_ignored(e.path()))
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_file())
-        .map(|e| e.path().to_path_buf())
+        .map(|e| normalize_walked_path(e.path()))
         .collect();
 
     let count = files.len();
@@ -127,6 +127,18 @@ pub fn extract_directory(root: &Path, graph: &mut dyn GraphMut) -> Result<usize>
 
 pub fn ignore_set(root: &Path) -> IgnoreSet {
     IgnoreSet::load(root)
+}
+
+/// Strip `.` (current-dir) components from a walked path, e.g.
+/// `/repo/./src/lib.rs` → `/repo/src/lib.rs`. `WalkDir` joins `root`
+/// verbatim onto each entry, so a `.`-containing root (a common way to
+/// invoke `extract_directory`) otherwise leaks into every `source_uri` /
+/// `qualified_name` built from that path.
+fn normalize_walked_path(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    path.components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .collect()
 }
 
 /// Extract a single file — dispatches to the language-specific extractor
@@ -244,6 +256,56 @@ mod tests {
 
     fn make_fn(graph: &mut dyn GraphMut, qname: &str) -> crate::core::NodeId {
         graph.add_node(Node::new(NodeKind::Function, qname))
+    }
+
+    #[test]
+    fn normalize_walked_path_strips_curdir_components() {
+        assert_eq!(
+            normalize_walked_path(Path::new("/repo/./src/lib.rs")),
+            Path::new("/repo/src/lib.rs")
+        );
+        assert_eq!(
+            normalize_walked_path(Path::new("./src/lib.rs")),
+            Path::new("src/lib.rs")
+        );
+        assert_eq!(
+            normalize_walked_path(Path::new("/repo/src/lib.rs")),
+            Path::new("/repo/src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn extract_directory_strips_curdir_from_source_uris() {
+        let dir = std::env::temp_dir().join(format!(
+            "ariadne_curdir_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+
+        // A root containing a literal "." component (e.g. `dir/.`) mirrors
+        // how callers can invoke extract_directory with a relative "./root".
+        let dotted_root = dir.join(".");
+        let mut graph = Graph::new();
+        extract_directory(&dotted_root, &mut graph).unwrap();
+
+        assert!(
+            graph
+                .nodes()
+                .all(|(_, n)| !n.qualified_name.contains("/./")),
+            "qualified_name should not contain a stray '/./' component: {:?}",
+            graph
+                .nodes()
+                .map(|(_, n)| n.qualified_name.clone())
+                .collect::<Vec<_>>()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
