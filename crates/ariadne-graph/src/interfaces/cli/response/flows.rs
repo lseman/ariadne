@@ -17,7 +17,6 @@ pub fn handle_flows(graph: &Graph, params: &Value) -> Value {
         .filter_map(|id| {
             let node = graph.node(id)?;
             Some(json!({
-                "id": id.0,
                 "qualified_name": node.qualified_name,
                 "entry_qualified_name": node.properties.get("entry_qualified_name"),
                 "entry_name": node.properties.get("entry_name"),
@@ -139,7 +138,6 @@ pub fn handle_test_coverage(db: &Path, graph: &Graph, params: &Value) -> Result<
                         .filter_map(|(test_id, _)| {
                             graph.node(test_id).map(|t| {
                                 json!({
-                                    "id": test_id.0,
                                     "qualified_name": t.qualified_name,
                                     "source_uri": t.source_uri,
                                 })
@@ -147,7 +145,6 @@ pub fn handle_test_coverage(db: &Path, graph: &Graph, params: &Value) -> Result<
                         })
                         .collect();
                     let entry = json!({
-                        "id": seed.0,
                         "qualified_name": node.qualified_name,
                         "kind": node.kind,
                         "source_uri": node.source_uri,

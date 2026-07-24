@@ -12,7 +12,6 @@ pub fn minimal_context_json(graph: &Graph, target: Option<&str>, mode: &str) -> 
         .filter_map(|hit| {
             graph.node(hit.id).map(|n| {
                 json!({
-                    "id": hit.id.0,
                     "score": hit.score,
                     "qualified_name": n.qualified_name,
                     "kind": n.kind,

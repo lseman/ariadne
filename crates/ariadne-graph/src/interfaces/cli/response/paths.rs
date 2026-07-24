@@ -22,7 +22,6 @@ pub fn handle_paths(graph: &Graph, params: &Value) -> Result<Value> {
                 .filter_map(|id| {
                     graph.node(id).map(|n| {
                         json!({
-                            "id": id.0,
                             "qualified_name": n.qualified_name,
                             "kind": n.kind,
                         })

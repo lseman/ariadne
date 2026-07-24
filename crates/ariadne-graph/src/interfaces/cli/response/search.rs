@@ -10,7 +10,6 @@ pub fn handle_search(graph: &Graph, params: &Value) -> Value {
         .filter_map(|hit| {
             graph.node(hit.id).map(|n| {
                 json!({
-                    "id": hit.id.0,
                     "score": hit.score,
                     "name": n.name,
                     "qualified_name": n.qualified_name,

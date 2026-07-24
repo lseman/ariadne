@@ -82,7 +82,6 @@ pub fn traverse_json(
         }
         if let Some(n) = graph.node(id) {
             let item = json!({
-                "id": id.0,
                 "depth": depth,
                 "qualified_name": n.qualified_name,
                 "kind": n.kind,

@@ -13,7 +13,7 @@ use std::path::Path;
 pub fn large_functions_json(graph: &Graph, min_lines: u32, limit: usize) -> Value {
     let mut rows: Vec<_> = graph
         .nodes()
-        .filter_map(|(id, n)| {
+        .filter_map(|(_id, n)| {
             if !matches!(
                 n.kind,
                 NodeKind::Function | NodeKind::Method | NodeKind::Class | NodeKind::Trait
@@ -26,7 +26,6 @@ pub fn large_functions_json(graph: &Graph, min_lines: u32, limit: usize) -> Valu
                 .map(|(s, e)| e.saturating_sub(s) + 1)?;
             (lines >= min_lines).then(|| {
                 json!({
-                    "id": id.0,
                     "lines": lines,
                     "qualified_name": n.qualified_name,
                     "kind": n.kind,
@@ -48,7 +47,6 @@ pub fn bridge_nodes_json(graph: &Graph, limit: usize) -> Value {
         .filter_map(|row| {
             graph.node(row.node).map(|n| {
                 json!({
-                    "id": row.node.0,
                     "score": row.score,
                     "communities_touched": row.communities_touched,
                     "degree": row.degree,
@@ -78,7 +76,6 @@ pub fn cycles_json(graph: &Graph, limit: usize) -> Value {
                 .filter_map(|id| {
                     graph.node(id).map(|n| {
                         json!({
-                            "id": id.0,
                             "qualified_name": n.qualified_name,
                             "kind": n.kind,
                             "source_uri": n.source_uri,
@@ -100,7 +97,6 @@ pub fn core_json(graph: &Graph, limit: usize) -> Value {
         .filter_map(|(id, coreness)| {
             graph.node(id).map(|n| {
                 json!({
-                    "id": id.0,
                     "core": coreness,
                     "degree": graph.in_neighbors(id).count() + graph.out_neighbors(id).count(),
                     "qualified_name": n.qualified_name,
@@ -123,7 +119,6 @@ pub fn articulation_json(graph: &Graph, limit: usize) -> Value {
         .filter_map(|id| {
             graph.node(id).map(|n| {
                 json!({
-                    "id": id.0,
                     "degree": graph.in_neighbors(id).count() + graph.out_neighbors(id).count(),
                     "qualified_name": n.qualified_name,
                     "kind": n.kind,
@@ -203,7 +198,7 @@ pub fn surprises_json(graph: &Graph, limit: usize) -> Value {
     };
 
     let mut rows: Vec<Value> = Vec::new();
-    for (id, src, dst, edge) in graph.edges() {
+    for (_id, src, dst, edge) in graph.edges() {
         let (Some(s), Some(d)) = (graph.node(src), graph.node(dst)) else {
             continue;
         };
@@ -248,7 +243,6 @@ pub fn surprises_json(graph: &Graph, limit: usize) -> Value {
             continue;
         }
         rows.push(json!({
-            "id": id.0,
             "score": score,
             "signals": signals,
             "src": s.qualified_name,

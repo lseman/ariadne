@@ -68,7 +68,6 @@ pub fn detect_changes_json(db: &Path, base: &str, max_depth: usize) -> Result<Va
             if seen.insert(hit.id) {
                 if let Some(n) = graph.node(hit.id) {
                     impacted.push(json!({
-                        "id": hit.id.0,
                         "score": hit.score,
                         "distance": hit.distance,
                         "qualified_name": n.qualified_name,
@@ -218,11 +217,8 @@ fn changed_edges_json(graph: &Graph, edges: &[ariadne_graph::query::ChangedEdge]
             let src = graph.node(edge.src);
             let dst = graph.node(edge.dst);
             json!({
-                "id": edge.id.0,
                 "kind": edge.edge_kind,
                 "change": edge.change,
-                "src_id": edge.src.0,
-                "dst_id": edge.dst.0,
                 "src": src.map(|node| node.qualified_name.clone()),
                 "dst": dst.map(|node| node.qualified_name.clone()),
                 "source_uri": src.and_then(|node| node.source_uri.clone())
@@ -239,7 +235,6 @@ pub(super) fn nodes_json(graph: &Graph, ids: &[NodeId], limit: usize) -> Vec<Val
         .filter_map(|id| {
             graph.node(*id).map(|n| {
                 json!({
-                    "id": id.0,
                     "qualified_name": n.qualified_name,
                     "kind": n.kind,
                     "source_uri": n.source_uri,
@@ -300,7 +295,6 @@ fn test_coverage_json(graph: &Graph, changed_nodes: &[NodeId]) -> Value {
             .filter_map(|(test_id, _)| {
                 graph.node(test_id).map(|t| {
                     json!({
-                        "id": test_id.0,
                         "qualified_name": t.qualified_name,
                         "source_uri": t.source_uri,
                     })
@@ -308,7 +302,6 @@ fn test_coverage_json(graph: &Graph, changed_nodes: &[NodeId]) -> Value {
             })
             .collect();
         let entry = json!({
-            "id": id.0,
             "qualified_name": node.qualified_name,
             "kind": node.kind,
             "source_uri": node.source_uri,
@@ -337,7 +330,6 @@ fn affected_flows_json(graph: &Graph, changed_nodes: &[NodeId], limit: usize) ->
         .filter_map(|flow_id| {
             let node = graph.node(flow_id)?;
             Some(json!({
-                "id": flow_id.0,
                 "qualified_name": node.qualified_name,
                 "entry_name": node.properties.get("entry_name"),
                 "entry_qualified_name": node.properties.get("entry_qualified_name"),

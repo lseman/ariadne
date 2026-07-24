@@ -25,7 +25,6 @@ pub fn handle_impact(graph: &Graph, params: &Value) -> Result<Value> {
     .filter_map(|hit| {
         graph.node(hit.id).map(|n| {
             json!({
-                "id": hit.id.0,
                 "score": hit.score,
                 "distance": hit.distance,
                 "qualified_name": n.qualified_name,
@@ -57,7 +56,6 @@ pub fn handle_god_nodes(graph: &Graph, params: &Value) -> Result<Value> {
                 return None;
             }
             Some(json!({
-                "id": id.0,
                 "score": score,
                 "qualified_name": n.qualified_name,
                 "kind": n.kind,

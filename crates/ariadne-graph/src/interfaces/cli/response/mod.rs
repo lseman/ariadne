@@ -211,8 +211,7 @@ fn _tool_response(
             let rows: Vec<_> = hubs
                 .into_iter()
                 .map(|h| {
-                    json!({
-                        "id": h.node.0,
+                    let mut row = json!({
                         "qualified_name": h.qualified_name,
                         "name": h.name,
                         "kind": h.kind,
@@ -220,8 +219,11 @@ fn _tool_response(
                         "in_degree": h.in_degree,
                         "out_degree": h.out_degree,
                         "total_degree": h.total_degree,
-                        "community_id": h.community_id,
-                    })
+                    });
+                    if let Some(community_id) = h.community_id {
+                        row["community_id"] = json!(community_id);
+                    }
+                    row
                 })
                 .collect();
             compact_for_detail(json!({ "operation": operation, "hits": rows }), detail)
@@ -261,7 +263,6 @@ fn _tool_response(
                 .into_iter()
                 .map(|h| {
                     json!({
-                        "id": h.id.0,
                         "qualified_name": h.qualified_name,
                         "name": h.name,
                         "kind": h.kind,
@@ -469,7 +470,7 @@ impl ResponseGuardrails {
             include_graph_summary: params
                 .get("include_graph_summary")
                 .and_then(Value::as_bool)
-                .unwrap_or(true),
+                .unwrap_or(false),
         }
     }
 }
@@ -506,15 +507,15 @@ fn apply_response_guardrails(
         if guardrails.include_graph_summary && !obj.contains_key("graph_summary") {
             obj.insert("graph_summary".to_string(), graph_summary_json(graph));
         }
-        obj.insert(
-            "guardrails".to_string(),
-            json!({
-                "response_limit": guardrails.limit,
-                "offset": guardrails.offset,
-                "hard_limit": ResponseGuardrails::HARD_LIMIT,
-                "pagination": pagination,
-            }),
-        );
+        let mut guardrails_json = json!({
+            "response_limit": guardrails.limit,
+            "offset": guardrails.offset,
+            "hard_limit": ResponseGuardrails::HARD_LIMIT,
+        });
+        if !pagination.is_empty() {
+            guardrails_json["pagination"] = Value::Object(pagination);
+        }
+        obj.insert("guardrails".to_string(), guardrails_json);
     }
     value
 }

@@ -114,7 +114,6 @@ fn bridge_rows_json(
         .filter_map(|row| {
             graph.node(row.node).map(|n| {
                 json!({
-                    "id": row.node.0,
                     "score": row.score,
                     "communities_touched": row.communities_touched,
                     "degree": row.degree,
