@@ -22,6 +22,7 @@
 //! - Images
 //! - HTML blocks (skipped for content extraction)
 
+use super::document_utils::{normalize_for_match, slugify, strip_file_suffix, tokenize_code};
 use crate::core::{Edge, EdgeKind, GraphMut, Node, NodeId, NodeKind};
 use anyhow::Result;
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -299,7 +300,12 @@ fn parse_optional_title(s: &str) -> Option<String> {
 }
 
 /// Extract symbol references from code block content.
-fn extract_symbols_from_code(code: &str, graph: &mut dyn GraphMut, section_id: NodeId, _file_qn: &str) {
+fn extract_symbols_from_code(
+    code: &str,
+    graph: &mut dyn GraphMut,
+    section_id: NodeId,
+    _file_qn: &str,
+) {
     // Split on word boundaries and try to resolve each token.
     for token in tokenize_code(code) {
         mention(graph, section_id, &token, 0.80);
@@ -307,7 +313,12 @@ fn extract_symbols_from_code(code: &str, graph: &mut dyn GraphMut, section_id: N
 }
 
 /// Extract symbol references from a URL or link text.
-fn extract_symbol_from_url(url: &str, graph: &mut dyn GraphMut, section_id: NodeId, _file_qn: &str) {
+fn extract_symbol_from_url(
+    url: &str,
+    graph: &mut dyn GraphMut,
+    section_id: NodeId,
+    _file_qn: &str,
+) {
     // Handle fragment URLs like #authenticate — strip the leading #.
     let candidate = if let Some(stripped) = url.strip_prefix('#') {
         stripped
@@ -323,40 +334,6 @@ fn extract_symbol_from_url(url: &str, graph: &mut dyn GraphMut, section_id: Node
     if !candidate.is_empty() && candidate.len() >= 2 {
         mention(graph, section_id, candidate, 0.70);
     }
-}
-
-/// Strip common file suffixes from a candidate name.
-fn strip_file_suffix(s: &str) -> &str {
-    let suffixes = [
-        ".html", ".md", ".txt", ".htm", ".php", ".js", ".ts", ".rs", ".py",
-    ];
-    for suffix in &suffixes {
-        if let Some(stripped) = s.strip_suffix(suffix) {
-            return stripped;
-        }
-    }
-    s
-}
-
-/// Tokenize code content into potential symbol names.
-fn tokenize_code(code: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-
-    for c in code.chars() {
-        if c.is_alphanumeric() || "_:.=+-".contains(c) {
-            current.push(c);
-        } else {
-            if !current.is_empty() {
-                tokens.push(std::mem::take(&mut current));
-            }
-            current.clear();
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens
 }
 
 /// Record a mention of `token` from `section_id`.
@@ -479,27 +456,6 @@ fn resolve_symbol(graph: &dyn crate::core::GraphMut, token: &str) -> Option<Node
     None
 }
 
-/// Normalize identifiers for fuzzy matching (camelCase splitting, etc.).
-fn normalize_for_match(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() * 2);
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() && i > 0 {
-            let prev = s.chars().nth(i - 1).unwrap();
-            let next = s.chars().nth(i + 1);
-            // Insert underscore before uppercase if preceded by lowercase, digit, or
-            // another uppercase followed by a lowercase (e.g. HTTPParser → http_parser)
-            if prev.is_lowercase()
-                || prev.is_ascii_digit()
-                || (prev.is_uppercase() && next.is_some_and(|nc| nc.is_lowercase()))
-            {
-                result.push('_');
-            }
-        }
-        result.push(c.to_ascii_lowercase());
-    }
-    result
-}
-
 fn level_to_u32(level: HeadingLevel) -> u32 {
     match level {
         HeadingLevel::H1 => 1,
@@ -511,32 +467,11 @@ fn level_to_u32(level: HeadingLevel) -> u32 {
     }
 }
 
-/// Generate a slug from heading text for use in section qualified names.
-fn slugify(s: &str) -> String {
-    if s.is_empty() {
-        return String::new();
-    }
-    s.chars()
-        .map(|c| {
-            if c.is_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Graph;
     use crate::core::{EdgeKind, Node, NodeKind};
+    use crate::Graph;
 
     #[test]
     fn extracts_document_and_sections() {

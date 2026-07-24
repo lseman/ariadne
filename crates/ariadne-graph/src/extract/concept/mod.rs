@@ -7,6 +7,7 @@
 //! carry `Confidence::Inferred(score)`.
 
 pub mod concept_registry;
+mod document_utils;
 pub mod html;
 pub mod markdown;
 

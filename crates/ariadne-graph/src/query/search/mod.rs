@@ -3,6 +3,9 @@ use crate::store::Store;
 use std::collections::HashMap;
 use std::path::Path;
 
+mod vocabulary;
+use vocabulary::SEARCH_STOPWORDS;
+
 const RRF_K: f32 = 60.0;
 const SOURCE_SATURATION_DECAY: f32 = 0.72;
 
@@ -766,11 +769,6 @@ fn search_query_tokens(normalized_query: &str) -> Vec<String> {
         .collect()
 }
 
-const SEARCH_STOPWORDS: &[&str] = &[
-    "and", "are", "for", "from", "has", "have", "how", "the", "what", "when", "where", "who",
-    "why", "with",
-];
-
 fn source_stem_matches(source: Option<&str>, query_tokens: &[String]) -> bool {
     let Some(source) = source else {
         return false;
@@ -1117,12 +1115,18 @@ mod tests {
             Node::new(NodeKind::Function, "pkg::auth::auth_login").with_source("src/auth.rs", 1, 5),
         );
         let second = g.add_node(
-            Node::new(NodeKind::Function, "pkg::auth::auth_logout")
-                .with_source("src/auth.rs", 7, 11),
+            Node::new(NodeKind::Function, "pkg::auth::auth_logout").with_source(
+                "src/auth.rs",
+                7,
+                11,
+            ),
         );
         let other = g.add_node(
-            Node::new(NodeKind::Function, "pkg::session::auth_session")
-                .with_source("src/session.rs", 1, 5),
+            Node::new(NodeKind::Function, "pkg::session::auth_session").with_source(
+                "src/session.rs",
+                1,
+                5,
+            ),
         );
 
         let hits = ranked_search(&g, "auth", 10);

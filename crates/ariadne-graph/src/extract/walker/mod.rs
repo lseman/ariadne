@@ -3,6 +3,9 @@ use anyhow::Result;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+mod exclusions;
+use exclusions::default_ignored_name;
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone)]
@@ -203,7 +206,9 @@ fn build_by_name(graph: &dyn crate::core::GraphMut) -> HashMap<String, Vec<crate
 /// from the qualified name. When resolving `graph.add_node()`, we look up
 /// the caller's impl type — if caller is `Graph::some_method`, then
 /// `self.add_node()` → `Graph::add_node`.
-fn build_caller_impl_context(graph: &dyn crate::core::GraphMut) -> HashMap<crate::core::NodeId, String> {
+fn build_caller_impl_context(
+    graph: &dyn crate::core::GraphMut,
+) -> HashMap<crate::core::NodeId, String> {
     let mut context: HashMap<crate::core::NodeId, String> = HashMap::new();
 
     for (id, node) in graph.nodes() {
@@ -288,16 +293,17 @@ fn infer_type_from_let_bindings(source: &str, var_name: &str) -> Option<String> 
         // `let var = …`
         if let Some(rhs) = after_name.strip_prefix('=') {
             let rhs = rhs.trim_start();
-            let rhs = rhs.trim_start_matches('&').trim_start_matches("mut").trim_start();
+            let rhs = rhs
+                .trim_start_matches('&')
+                .trim_start_matches("mut")
+                .trim_start();
             // `let var = Type::` — constructor or associated fn.
             if let Some(idx) = rhs.find("::") {
                 let ty: String = rhs[..idx]
                     .chars()
                     .take_while(|c| c.is_alphanumeric() || *c == '_')
                     .collect();
-                if !ty.is_empty()
-                    && ty.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-                {
+                if !ty.is_empty() && ty.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                     return Some(ty);
                 }
             }
@@ -308,9 +314,7 @@ fn infer_type_from_let_bindings(source: &str, var_name: &str) -> Option<String> 
                     .chars()
                     .take_while(|c| c.is_alphanumeric() || *c == '_')
                     .collect();
-                if !ty.is_empty()
-                    && ty.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-                {
+                if !ty.is_empty() && ty.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                     return Some(ty);
                 }
             }
@@ -475,15 +479,12 @@ pub fn resolve_call_placeholders(graph: &mut dyn GraphMut) -> usize {
                     .node(src)
                     .map(|n| n.qualified_name.as_str())
                     .unwrap_or("");
-                let best = scoped
-                    .iter()
-                    .copied()
-                    .max_by_key(|&cand| {
-                        graph
-                            .node(cand)
-                            .map(|n| common_prefix_len(caller_qn, &n.qualified_name))
-                            .unwrap_or(0)
-                    });
+                let best = scoped.iter().copied().max_by_key(|&cand| {
+                    graph
+                        .node(cand)
+                        .map(|n| common_prefix_len(caller_qn, &n.qualified_name))
+                        .unwrap_or(0)
+                });
                 if let Some(cand) = best {
                     stale_edges.push(edge_id);
                     if !existing.contains(&(src, cand)) {
@@ -502,7 +503,10 @@ pub fn resolve_call_placeholders(graph: &mut dyn GraphMut) -> usize {
         //
         // Tier 3.5+: for non-self receivers, try AST-derived let-binding scan
         // before falling back to the hardcoded name map.
-        if let Some(receiver_name) = edge.properties.get("call_receiver").and_then(|v| v.as_str())
+        if let Some(receiver_name) = edge
+            .properties
+            .get("call_receiver")
+            .and_then(|v| v.as_str())
         {
             // Determine the impl type from the receiver and caller context.
             let impl_type: Option<String> = if receiver_name == "self"
@@ -515,9 +519,7 @@ pub fn resolve_call_placeholders(graph: &mut dyn GraphMut) -> usize {
                     .node(src)
                     .and_then(|n| n.source_uri.as_ref())
                     .and_then(|uri| std::fs::read_to_string(uri).ok())
-                    .and_then(|src_text| {
-                        infer_type_from_let_bindings(&src_text, receiver_name)
-                    });
+                    .and_then(|src_text| infer_type_from_let_bindings(&src_text, receiver_name));
                 // Fall back to the heuristic name map.
                 ast_inferred.or_else(|| infer_type_from_var_name(receiver_name))
             };
@@ -1032,11 +1034,6 @@ pub fn derive_tested_by_edges(graph: &mut dyn GraphMut) -> usize {
         }
     }
     count
-}
-
-fn default_ignored_name(name: &str) -> bool {
-    (name.starts_with('.') && name.len() > 1)
-        || matches!(name, "target" | "node_modules" | "__pycache__")
 }
 
 #[cfg(test)]
@@ -1950,12 +1947,11 @@ pub fn entry() -> u32 { beta::shared() }
         // the caller, so Tier 3b should pick it.
         let a = make_fn(&mut g, "file::src::utils::helper");
         let _b = make_fn(&mut g, "file::src::core::helper");
-        let caller_node =
-            Node::new(NodeKind::Function, "file::src::utils::caller").with_source(
-                "src/utils/caller.rs".to_string(),
-                0,
-                10,
-            );
+        let caller_node = Node::new(NodeKind::Function, "file::src::utils::caller").with_source(
+            "src/utils/caller.rs".to_string(),
+            0,
+            10,
+        );
         let caller = g.add_node(caller_node);
         let ph = g.add_node(Node::new(NodeKind::Function, "call::helper"));
         let mut call_edge = Edge::ambiguous(EdgeKind::Calls);
@@ -1965,38 +1961,35 @@ pub fn entry() -> u32 { beta::shared() }
             .insert("call_scope".into(), serde_json::json!("src"));
         g.add_edge(caller, ph, call_edge);
         let resolved = resolve_call_placeholders(&mut g);
-        assert_eq!(resolved, 1, "expected exactly 1 resolution via scoped_prefix");
+        assert_eq!(
+            resolved, 1,
+            "expected exactly 1 resolution via scoped_prefix"
+        );
         let points_to_a = g
             .out_neighbors(caller)
             .any(|(dst, e)| dst == a && e.kind == EdgeKind::Calls);
-        assert!(points_to_a, "should resolve to src::utils::helper (closer prefix)");
+        assert!(
+            points_to_a,
+            "should resolve to src::utils::helper (closer prefix)"
+        );
     }
 
     #[test]
     fn tier5_same_dir_affinity() {
         let mut g = Graph::new();
         // Two `process` functions: one in src/pipeline, one in src/io.
-        let pipeline_fn =
-            Node::new(NodeKind::Function, "file::src/pipeline/mod::process").with_source(
-                "src/pipeline/mod.rs".to_string(),
-                0,
-                5,
-            );
-        let io_fn =
-            Node::new(NodeKind::Function, "file::src/io/mod::process").with_source(
-                "src/io/mod.rs".to_string(),
-                0,
-                5,
-            );
+        let pipeline_fn = Node::new(NodeKind::Function, "file::src/pipeline/mod::process")
+            .with_source("src/pipeline/mod.rs".to_string(), 0, 5);
+        let io_fn = Node::new(NodeKind::Function, "file::src/io/mod::process").with_source(
+            "src/io/mod.rs".to_string(),
+            0,
+            5,
+        );
         let a = g.add_node(pipeline_fn);
         let b = g.add_node(io_fn);
         // Caller in src/pipeline/runner.rs — same dir as `a`.
-        let caller_node =
-            Node::new(NodeKind::Function, "file::src/pipeline/runner::run").with_source(
-                "src/pipeline/runner.rs".to_string(),
-                0,
-                10,
-            );
+        let caller_node = Node::new(NodeKind::Function, "file::src/pipeline/runner::run")
+            .with_source("src/pipeline/runner.rs".to_string(), 0, 10);
         let caller = g.add_node(caller_node);
         let ph = g.add_node(Node::new(NodeKind::Function, "call::process"));
         g.add_edge(caller, ph, Edge::ambiguous(EdgeKind::Calls));

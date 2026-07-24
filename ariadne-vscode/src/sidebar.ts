@@ -47,7 +47,7 @@ export class AriadneTreeProvider implements vscode.TreeDataProvider<AriadneTreeN
     }));
   }
 
-  getParent?(element: AriadneTreeNode): vscode.TreeItem | null {
+  getParent?(_element: AriadneTreeNode): vscode.TreeItem | null {
     return null;
   }
 }

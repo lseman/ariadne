@@ -1,39 +1,13 @@
-//! cmd_tool, cmd_mcp, cmd_mcp_server.
+//! cmd_tool and cmd_mcp_server.
 
 use anyhow::Result;
 use serde_json::json;
-use std::io::BufRead;
 use std::path::Path;
 
 pub fn cmd_tool(db: &Path, operation: &str, params: &str) -> Result<()> {
     let params: serde_json::Value = serde_json::from_str(params)?;
     let response = super::response::tool_response(db, operation, &params)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
-    Ok(())
-}
-
-pub fn cmd_mcp(db: &Path) -> Result<()> {
-    use super::mcp::required_str;
-
-    eprintln!(
-        "Ariadne MCP-style JSON loop ready. Send {{\"operation\":\"search\",\"params\":{{...}}}}."
-    );
-    for line in std::io::stdin().lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let request: serde_json::Value = serde_json::from_str(&line)?;
-        let operation = required_str(&request, "operation")?;
-        let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-        match super::response::tool_response_cached(db, operation, &params) {
-            Ok(response) => println!("{}", serde_json::to_string_pretty(&response)?),
-            Err(e) => println!(
-                "{}",
-                json!({ "operation": operation, "error": e.to_string() })
-            ),
-        };
-    }
     Ok(())
 }
 

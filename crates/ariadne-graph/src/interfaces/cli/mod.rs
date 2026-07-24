@@ -102,7 +102,6 @@ pub fn run(db: &Path, command: &Commands) -> Result<()> {
         } => counterfactual::cmd_counterfactual(db, symbol, direction, *max_depth),
         Commands::Motifs { built_in, limit } => analysis::cmd_motifs(db, built_in, *limit),
         Commands::Tool { operation, params } => tool::cmd_tool(db, operation, params),
-        Commands::Mcp => tool::cmd_mcp(db),
         Commands::McpServer => tool::cmd_mcp_server(db),
         Commands::GodNodes { top, seed } => advanced::cmd_god_nodes(db, *top, seed.as_deref()),
         Commands::Communities { top, algorithm } => advanced::cmd_communities(db, *top, algorithm),

@@ -165,8 +165,7 @@ export class AriadneClient {
       const { spawn } = await import('child_process');
       await new Promise<void>((resolve, reject) => {
         const p = spawn(this.getBinaryPath(), ['--help'], { timeout: 5000 });
-        let out = '';
-        p.stdout?.on('data', (d: Buffer) => { out += d.toString(); });
+        p.stdout?.resume();
         p.on('close', (code) => code === 0 ? resolve() : reject(new Error(`exit ${code}`)));
         p.on('error', reject);
         setTimeout(() => { p.kill(); reject(new Error('timeout')); }, 5000);

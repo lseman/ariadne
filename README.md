@@ -366,13 +366,6 @@ Ariadne exposes one external MCP tool named `ariadne`; pass `operation` and opti
 }
 ```
 
-The legacy `mcp` command is a newline-delimited JSON loop for simple wrappers:
-
-```bash
-printf '%s\n' '{"operation":"status"}' \
-  | ariadne --db ariadne.db mcp
-```
-
 ## CLI Reference
 
 All commands accept `--db path/to/ariadne.db` (default: `ariadne.db`).
@@ -396,7 +389,6 @@ All commands accept `--db path/to/ariadne.db` (default: `ariadne.db`).
 | `ariadne serve` | `--host 127.0.0.1`, `--port 8787`, `--bind`, `--algorithm leiden` | Serves the browser D3 graph explorer with search and graph JSON endpoints |
 | `ariadne tui` | | Opens the ratatui terminal UI with Search, Flows, and Browse tabs |
 | `ariadne mcp-server` | | Runs the real stdio MCP server exposing one external tool named `ariadne` |
-| `ariadne mcp` | | Runs the legacy newline-delimited JSON loop |
 
 ### Search and Navigation
 

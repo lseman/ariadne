@@ -29,6 +29,9 @@ use crossterm::{
 use ratatui::{prelude::*, widgets::*};
 use std::io::stdout;
 
+mod theme;
+use theme::{focus_color, kind_label, kind_style, trunc};
+
 // ── identifiers ───────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq)]
@@ -861,62 +864,6 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
     let status = Paragraph::new(help).style(Style::default().fg(Color::DarkGray));
     f.render_widget(status, area);
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-fn kind_label(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Function => "fn",
-        NodeKind::Method => "meth",
-        NodeKind::Class => "cls",
-        NodeKind::Module => "mod",
-        NodeKind::Flow => "flow",
-        NodeKind::Trait => "trait",
-        NodeKind::Impl => "impl",
-        NodeKind::Type => "type",
-        NodeKind::Variable => "var",
-        NodeKind::File => "file",
-        _ => "·",
-    }
-}
-
-fn kind_style(kind: NodeKind) -> Style {
-    match kind {
-        NodeKind::Function => Style::default().fg(Color::Cyan),
-        NodeKind::Method => Style::default().fg(Color::LightBlue),
-        NodeKind::Class => Style::default().fg(Color::Green),
-        NodeKind::Module => Style::default().fg(Color::Yellow),
-        NodeKind::Flow => Style::default()
-            .fg(Color::Magenta)
-            .add_modifier(Modifier::BOLD),
-        NodeKind::Trait => Style::default().fg(Color::LightGreen),
-        NodeKind::Impl => Style::default().fg(Color::LightYellow),
-        NodeKind::Type => Style::default().fg(Color::LightCyan),
-        _ => Style::default(),
-    }
-}
-
-fn focus_color(focused: bool) -> Style {
-    if focused {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    }
-}
-
-fn trunc(s: &str, max: usize) -> String {
-    // Operate on chars to avoid splitting multi-byte sequences.
-    let mut chars = s.chars();
-    let mut out = String::with_capacity(max);
-    for (count, c) in chars.by_ref().enumerate() {
-        if count >= max.saturating_sub(1) {
-            out.push('…');
-            return out;
-        }
-        out.push(c);
-    }
-    out
 }
 
 // ── public entry point ────────────────────────────────────────────────────────

@@ -23,7 +23,8 @@ pub fn extract_source_text(source: &str, line_start: u32, line_end: u32) -> Opti
         return None;
     }
     if text.len() > 10_000 {
-        Some(text[..10_000].to_string())
+        // .get(..) is UTF-8 safe; truncates to nearest char boundary.
+        Some(text.get(..10_000).unwrap_or(&text).to_string())
     } else {
         Some(text)
     }

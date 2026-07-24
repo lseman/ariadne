@@ -210,8 +210,6 @@ pub enum Commands {
         #[arg(long, default_value = "{}")]
         params: String,
     },
-    /// JSON-lines one-tool loop for MCP adapters and editor wrappers.
-    Mcp,
     /// Real stdio MCP server exposing Ariadne as one tool.
     McpServer,
     /// Top-ranked nodes by PageRank.

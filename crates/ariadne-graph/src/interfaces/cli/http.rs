@@ -224,6 +224,6 @@ fn url_decode(value: &str) -> String {
 }
 
 /// Embedded static assets.
-const INDEX_HTML: &str = include_str!("../../static/index.html");
-const APP_JS: &str = include_str!("../../static/app.js");
-const STYLE_CSS: &str = include_str!("../../static/style.css");
+const INDEX_HTML: &str = include_str!("../../../static/index.html");
+const APP_JS: &str = include_str!("../../../static/app.js");
+const STYLE_CSS: &str = include_str!("../../../static/style.css");

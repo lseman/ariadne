@@ -1,4 +1,5 @@
 //! `ariadne-graph` — a graph-based semantic system for code, documents, and diagrams.
+
 //!
 //! Historically split across four internal crates (`ariadne-core`,
 //! `ariadne-extract`, `ariadne-store`, `ariadne-query`); now collapsed into a
@@ -8,8 +9,11 @@
 //! Top-level re-exports mirror the old `crate::core::*` flat namespace so
 //! call sites can keep writing `use ariadne_graph::{Edge, Graph, NodeId}`.
 
+extern crate self as ariadne_graph;
+
 pub mod core;
 pub mod extract;
+pub mod interfaces;
 pub mod query;
 pub mod store;
 pub mod tui;

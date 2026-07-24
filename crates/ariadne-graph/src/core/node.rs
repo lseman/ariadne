@@ -119,7 +119,8 @@ impl Node {
     pub fn with_source_text(mut self, text: impl Into<String>) -> Self {
         let text = text.into();
         self.source_text = Some(if text.len() > 10_000 {
-            text[..10_000].to_string()
+            // UTF-8 safe truncation.
+            text.get(..10_000).unwrap_or(&text).to_string()
         } else {
             text
         });

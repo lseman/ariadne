@@ -3,8 +3,6 @@ import { AriadneClient } from './mcp';
 import { AriadneOperation } from './types';
 import { AriadneResultPanel } from './resultPanel';
 
-const PANELS = new Map<string, AriadneResultPanel>();
-
 export function registerCommands(context: vscode.ExtensionContext, client: AriadneClient) {
   const extensionUri = context.extensionUri;
   const cmds = [
@@ -21,7 +19,7 @@ export function registerCommands(context: vscode.ExtensionContext, client: Ariad
     { name: 'diagnostics', title: 'Ariadne: Diagnostics', icon: '$(output)' },
   ];
 
-  for (const { name, title } of cmds) {
+  for (const { name } of cmds) {
     context.subscriptions.push(
       vscode.commands.registerCommand(`ariadne.${name}`, async () => {
         await runOperation(extensionUri, client, name as AriadneOperation);
@@ -114,7 +112,7 @@ async function runOperation(extensionUri: vscode.Uri, client: AriadneClient, ope
     async () => {
       try {
         const result = await client.callOperation(operation, extraParams);
-        const panel = AriadneResultPanel.createOrShow(extensionUri, operation, result);
+        AriadneResultPanel.createOrShow(extensionUri, operation, result);
       } catch (err) {
         vscode.window.showErrorMessage(`Ariadne error: ${err instanceof Error ? err.message : String(err)}`);
       }

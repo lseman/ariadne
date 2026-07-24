@@ -75,14 +75,6 @@ fn toml_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
-/// Required string parameter.
-pub fn required_str<'a>(params: &'a Value, key: &str) -> anyhow::Result<&'a str> {
-    params
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("missing string param '{}'", key))
-}
-
 /// Read an MCP message from the reader.
 /// Supports two framing formats:
 /// 1. Content-Length framing (standard MCP): `Content-Length: N\r\n\r\n{body}`

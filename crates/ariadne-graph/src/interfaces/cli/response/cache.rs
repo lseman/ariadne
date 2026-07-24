@@ -3,9 +3,9 @@
 //! Not used by the one-shot `ariadne tool` CLI path — see `tool_response_cached`
 //! vs `tool_response` in mod.rs.
 
+use anyhow::Result;
 use ariadne_graph::store::Store;
 use ariadne_graph::Graph;
-use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
