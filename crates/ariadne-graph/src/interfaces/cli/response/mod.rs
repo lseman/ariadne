@@ -97,18 +97,12 @@ fn _tool_response(
         "paths" => compact_for_detail(handle_paths(&graph, params)?, detail),
         "impact" => compact_for_detail(handle_impact(&graph, params)?, detail),
         "detect_changes" => {
-            let base = params
-                .get("base")
-                .and_then(Value::as_str)
-                .unwrap_or("HEAD~1");
+            let base = base_param(params);
             let max_depth = params.get("max_depth").and_then(Value::as_u64).unwrap_or(2) as usize;
             compact_for_detail(detect_changes_json(db, base, max_depth)?, detail)
         }
         "review_context" => {
-            let base = params
-                .get("base")
-                .and_then(Value::as_str)
-                .unwrap_or("HEAD~1");
+            let base = base_param(params);
             let max_lines_per_file = params
                 .get("max_lines_per_file")
                 .and_then(Value::as_u64)
@@ -144,45 +138,28 @@ fn _tool_response(
                 .get("min_lines")
                 .and_then(Value::as_u64)
                 .unwrap_or(80) as u32;
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+            let limit = limit_param(params, 50);
             compact_for_detail(large_functions_json(&graph, min_lines, limit), detail)
         }
         "bridge_nodes" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
-            compact_for_detail(bridge_nodes_json(&graph, limit), detail)
+            compact_for_detail(bridge_nodes_json(&graph, limit_param(params, 25)), detail)
         }
-        "cycles" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
-            compact_for_detail(cycles_json(&graph, limit), detail)
-        }
-        "core" | "k_core" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
-            compact_for_detail(core_json(&graph, limit), detail)
-        }
+        "cycles" => compact_for_detail(cycles_json(&graph, limit_param(params, 25)), detail),
+        "core" | "k_core" => compact_for_detail(core_json(&graph, limit_param(params, 25)), detail),
         "articulation" | "articulation_points" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
-            compact_for_detail(articulation_json(&graph, limit), detail)
+            compact_for_detail(articulation_json(&graph, limit_param(params, 25)), detail)
         }
-        "gaps" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
-            compact_for_detail(gaps_json(&graph, limit), detail)
-        }
+        "gaps" => compact_for_detail(gaps_json(&graph, limit_param(params, 25)), detail),
         "surprises" | "surprise_scoring" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
-            compact_for_detail(surprises_json(&graph, limit), detail)
+            compact_for_detail(surprises_json(&graph, limit_param(params, 25)), detail)
         }
         "diagnostics" | "health" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
-            compact_for_detail(diagnostics_json(db, limit)?, detail)
+            compact_for_detail(diagnostics_json(db, limit_param(params, 25))?, detail)
         }
         "graph_diff" => {
-            let base = params
-                .get("base")
-                .and_then(Value::as_str)
-                .unwrap_or("HEAD~1");
+            let base = base_param(params);
             let head = params.get("head").and_then(Value::as_str).unwrap_or("HEAD");
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
-            compact_for_detail(graph_diff_json(db, base, head, limit)?, detail)
+            compact_for_detail(graph_diff_json(db, base, head, limit_param(params, 50))?, detail)
         }
         "counterfactual" => {
             let target = required_str(params, "target")?;
@@ -201,17 +178,15 @@ fn _tool_response(
                 .get("built_in")
                 .and_then(Value::as_str)
                 .unwrap_or("security_audit");
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
-            compact_for_detail(motifs_json(db, built_in, limit)?, detail)
+            compact_for_detail(motifs_json(db, built_in, limit_param(params, 50))?, detail)
         }
         "suggested_questions" => {
-            let base = params
-                .get("base")
-                .and_then(Value::as_str)
-                .unwrap_or("HEAD~1");
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+            let base = base_param(params);
             let analysis = detect_changes_json(db, base, 2)?;
-            compact_for_detail(suggested_questions_json(&analysis, limit), detail)
+            compact_for_detail(
+                suggested_questions_json(&analysis, limit_param(params, 10)),
+                detail,
+            )
         }
         "architecture_overview" | "architecture" => architecture_overview_json(&graph, detail),
         "god_nodes" => compact_for_detail(handle_god_nodes(&graph, params)?, detail),
@@ -232,8 +207,7 @@ fn _tool_response(
             )
         }
         "hub_nodes" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
-            let hubs = ariadne_graph::query::hub_nodes(&graph, limit);
+            let hubs = ariadne_graph::query::hub_nodes(&graph, limit_param(params, 25));
             let rows: Vec<_> = hubs
                 .into_iter()
                 .map(|h| {
@@ -250,10 +224,10 @@ fn _tool_response(
                     })
                 })
                 .collect();
-            compact_for_detail(json!({ "operation": "hub_nodes", "hits": rows }), detail)
+            compact_for_detail(json!({ "operation": operation, "hits": rows }), detail)
         }
         "knowledge_gaps" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
+            let limit = limit_param(params, 100);
             let result = ariadne_graph::query::knowledge_gaps(&graph);
             // Truncate each category to limit
             let mut out = result.as_object().cloned().unwrap_or_default();
@@ -274,15 +248,14 @@ fn _tool_response(
             let xml = ariadne_graph::query::export::export_graphml(&graph, &communities);
             std::fs::write(output, &xml)?;
             compact_for_detail(
-                json!({ "operation": "export_graphml", "output": output, "format": "graphml", "written": true, "size": xml.len() }),
+                json!({ "operation": operation, "output": output, "format": "graphml", "written": true, "size": xml.len() }),
                 detail,
             )
         }
         "find_related" => {
             let target = required_str(params, "target")?;
             let line = params.get("line").and_then(Value::as_u64).map(|v| v as u32);
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
-            let store = ariadne_graph::store::Store::open(db)?;
+            let limit = limit_param(params, 25);
             let hits = ariadne_graph::query::find_related(&store, &graph, target, line, limit);
             let rows: Vec<_> = hits
                 .into_iter()
@@ -299,7 +272,7 @@ fn _tool_response(
                 })
                 .collect();
             compact_for_detail(
-                json!({ "operation": "find_related", "target": target, "hits": rows }),
+                json!({ "operation": operation, "target": target, "hits": rows }),
                 detail,
             )
         }
@@ -327,7 +300,7 @@ fn _tool_response(
                 .collect();
             compact_for_detail(
                 json!({
-                    "operation": "rename_preview",
+                    "operation": operation,
                     "target": preview.target_qname,
                     "target_name": preview.target_name,
                     "new_name": preview.new_name,
@@ -344,10 +317,9 @@ fn _tool_response(
             )
         }
         "dead_code" => {
-            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
-            let dead = ariadne_graph::query::find_dead_code(&graph, limit);
+            let dead = ariadne_graph::query::find_dead_code(&graph, limit_param(params, 100));
             compact_for_detail(
-                json!({ "operation": "dead_code", "dead_nodes": dead, "total_dead": dead.len() }),
+                json!({ "operation": operation, "dead_nodes": dead, "total_dead": dead.len() }),
                 detail,
             )
         }
@@ -384,7 +356,7 @@ fn _tool_response(
                 .collect();
             compact_for_detail(
                 json!({
-                    "operation": "community_split",
+                    "operation": operation,
                     "threshold": threshold,
                     "min_size": min_size,
                     "new_communities": new_communities,
@@ -602,6 +574,17 @@ pub(super) fn required_str<'a>(params: &'a Value, key: &str) -> Result<&'a str> 
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("missing string param '{}'", key))
+}
+
+pub(super) fn limit_param(params: &Value, default: u64) -> usize {
+    params.get("limit").and_then(Value::as_u64).unwrap_or(default) as usize
+}
+
+pub(super) fn base_param(params: &Value) -> &str {
+    params
+        .get("base")
+        .and_then(Value::as_str)
+        .unwrap_or("HEAD~1")
 }
 
 /// Global response session (singleton).
